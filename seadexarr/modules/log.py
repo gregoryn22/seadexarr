@@ -31,7 +31,7 @@ def setup_logger(
     """
 
     if os.environ.get("DOCKER_ENV"):
-        config_dir = os.environ.get("CONFIG_DIR")
+        config_dir = os.environ.get("CONFIG_DIR", "/config")
         log_dir = os.path.join(config_dir, log_dir)
     else:
         log_dir = os.path.join(os.getcwd(), log_dir)
@@ -63,17 +63,13 @@ def setup_logger(
 
     # Set the log level based on the provided parameter
     log_level = log_level.upper()
-    if log_level == "DEBUG":
-        logger.setLevel(logging.DEBUG)
-    elif log_level == "INFO":
-        logger.setLevel(logging.INFO)
-    elif log_level == "WARNING":
-        logger.setLevel(logging.WARNING)
-    elif log_level == "CRITICAL":
-        logger.setLevel(logging.CRITICAL)
-    else:
-        logger.critical(f"Invalid log level '{log_level}', defaulting to 'INFO'")
-        logger.setLevel(logging.INFO)
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "CRITICAL": logging.CRITICAL,
+    }
+    numeric_level = level_map.get(log_level)
 
     # Define the log message format for the log files
     logfile_formatter = logging.Formatter(
@@ -82,32 +78,28 @@ def setup_logger(
 
     # Create a RotatingFileHandler for log files
     handler = RotatingFileHandler(
-        log_file, delay=True, mode="w", encoding="utf-8", backupCount=max_logs
+        log_file, mode="w", encoding="utf-8", backupCount=max_logs
     )
     handler.setFormatter(logfile_formatter)
 
-    # Add the file handler to the logger
-    logger.addHandler(handler)
-
-    # Configure console logging with the specified log level
+    # Configure console logging
     console_handler = colorlog.StreamHandler(sys.stdout)
-    if log_level == "DEBUG":
-        console_handler.setLevel(logging.DEBUG)
-    elif log_level == "INFO":
-        console_handler.setLevel(logging.INFO)
-    elif log_level == "CRITICAL":
-        console_handler.setLevel(logging.CRITICAL)
-
-    # Add the console handler to the logger
     console_handler.setFormatter(
         colorlog.ColoredFormatter("%(log_color)s%(levelname)s: %(message)s")
     )
+
+    # Replace any handlers from a previous setup_logger call
+    logger.handlers.clear()
+    logger.addHandler(handler)
     logger.addHandler(console_handler)
 
-    # Overwrite previous logger if exists
-    logging.getLogger(log_name).handlers.clear()
-    logging.getLogger(log_name).addHandler(handler)
-    logging.getLogger(log_name).addHandler(console_handler)
+    if numeric_level is None:
+        logger.setLevel(logging.INFO)
+        logger.critical(f"Invalid log level '{log_level}', defaulting to 'INFO'")
+    else:
+        logger.setLevel(numeric_level)
+        handler.setLevel(numeric_level)
+        console_handler.setLevel(numeric_level)
 
     return logger
 

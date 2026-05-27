@@ -1,6 +1,7 @@
 import copy
 import os
 import shutil
+import sys
 import time
 import traceback
 from datetime import datetime, timedelta
@@ -11,6 +12,15 @@ from .audit import SeaDexAudit
 from .seadex_arr import setup_logger
 from .seadex_radarr import SeaDexRadarr
 from .seadex_sonarr import SeaDexSonarr
+
+def _make_logger():
+    try:
+        return setup_logger(log_level=os.getenv("LOG_LEVEL", "INFO"))
+    except Exception as exc:
+        print(f"[SeaDexArr] FATAL: could not create log file: {exc}", file=sys.stderr)
+        print(f"[SeaDexArr] Check that CONFIG_DIR ({os.getenv('CONFIG_DIR', '/config')}) is mounted and writable.", file=sys.stderr)
+        raise
+
 
 seadexarr_cli = typer.Typer(name="seadexarr_cli")
 seadexarr_run = typer.Typer(name="run")
@@ -56,7 +66,7 @@ def run_scheduled():
 
     while True:
 
-        logger = setup_logger(log_level="INFO")
+        logger = _make_logger()
         logger.info(f"Running in scheduled mode")
 
         present_time = datetime.now().strftime("%H:%M")
@@ -115,7 +125,8 @@ def run_single(
     config = os.path.join(config_dir, "config.yml")
     cache = os.path.join(config_dir, "cache.json")
 
-    logger = setup_logger(log_level="INFO")
+    logger = _make_logger()
+    logger.info("Starting single run")
 
     if radarr:
         try:
@@ -175,7 +186,8 @@ def run_audit(
     config = os.path.join(config_dir, "config.yml")
     cache = os.path.join(config_dir, "cache.json")
 
-    logger = setup_logger(log_level="INFO")
+    logger = _make_logger()
+    logger.info("Starting audit run")
 
     try:
         sda = SeaDexAudit(config=config, cache=cache, logger=logger)
