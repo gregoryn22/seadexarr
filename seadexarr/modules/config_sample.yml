@@ -47,3 +47,38 @@ anime_mappings:
 anidb_mappings:
 anibridge_mappings:
 log_level: "INFO"
+
+# Audit mode: scan, classify, tag — never grabs torrents
+audit:
+  enabled: false
+  dry_run: true           # true = log only, no Sonarr mutations
+  sonarr_only: true
+  notify_discord: true
+  update_sonarr_tags: true
+  remove_stale_tags: false  # only removes tags listed in audit.tags
+
+  tags:
+    full_seadex: seadex
+    partial_seadex: partial-seadex
+    upgrade_available: seadex-upgrade-available
+    too_large: seadex-too-large
+    ignored: seadex-ignored
+
+  size_filters:
+    enabled: true
+    max_absolute_gb: 80
+    max_size_multiplier: 2.0
+    notify_when_too_large: true
+    tag_when_too_large: true
+
+  discord:
+    notify_on_new_seadex_match: true
+    notify_on_new_upgrade_available: true
+    notify_on_partial_match: true
+    notify_on_too_large: true
+    notify_on_no_change: false
+    batch_notifications: true
+
+  state:
+    enabled: true
+    path:    # defaults to /config/audit_state.json if blank
