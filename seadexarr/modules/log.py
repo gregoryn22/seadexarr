@@ -37,8 +37,9 @@ def setup_logger(
         log_dir = os.path.join(os.getcwd(), log_dir)
 
     # Create the log directory if it doesn't exist
+    # mode=0o755 ensures the directory is traversable via SMB/NFS
     if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
+        os.makedirs(log_dir, mode=0o755)
 
     # Define the log file path
     log_file = os.path.join(log_dir, f"{log_name}.log")
