@@ -316,6 +316,7 @@ class SeaDexAudit(SeaDexSonarr):
                     total_length=self.log_line_length,
                 )
             )
+            self.logger.debug("Full traceback:", exc_info=True)
 
         return result
 

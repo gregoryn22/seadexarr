@@ -56,7 +56,7 @@ def run_scheduled():
 
     while True:
 
-        logger = setup_logger(log_level="INFO")
+        logger = setup_logger(log_level=os.getenv("LOG_LEVEL", "INFO"))
         logger.info(f"Running in scheduled mode")
 
         present_time = datetime.now().strftime("%H:%M")
