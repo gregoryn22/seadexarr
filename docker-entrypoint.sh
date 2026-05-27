@@ -4,11 +4,18 @@
 #   audit       (default) — run audit on a repeating schedule
 #   audit-once  — run audit once and exit
 #   sync        — run existing grab/sync mode on a repeating schedule
+#
+# SIGTERM/SIGINT during an audit run is forwarded to the Python process,
+# which finishes the current series then saves state and exits cleanly.
+# SIGTERM during the inter-run sleep causes an immediate clean exit.
 
 set -e
 
 AUDIT_SCHEDULE_TIME="${AUDIT_SCHEDULE_TIME:-6}"
 AUDIT_ARGS="${AUDIT_ARGS:---apply-tags}"
+
+# Clean exit on SIGTERM / SIGINT (handles the sleep period between runs)
+trap 'exit 0' TERM INT
 
 case "${RUN_MODE:-audit}" in
 
@@ -17,7 +24,9 @@ case "${RUN_MODE:-audit}" in
     while true; do
       seadexarr audit ${AUDIT_ARGS}
       echo "Audit complete. Next run in ${AUDIT_SCHEDULE_TIME}h."
-      sleep $(( AUDIT_SCHEDULE_TIME * 3600 ))
+      # Run sleep in background and wait so the trap fires immediately
+      sleep $(( AUDIT_SCHEDULE_TIME * 3600 )) &
+      wait $!
     done
     ;;
 
