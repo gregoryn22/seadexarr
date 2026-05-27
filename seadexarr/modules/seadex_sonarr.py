@@ -856,13 +856,13 @@ class SeaDexSonarr(SeaDexArr):
                 missing_eps += 1
                 continue
 
-            release_group = ep.get("episodeFile", {}).get("releaseGroup", None)
+            release_group = (ep.get("episodeFile") or {}).get("releaseGroup", None)
             if release_group is None or release_group == "":
                 continue
 
             if release_group not in sonarr_release_dict:
                 sonarr_release_dict[release_group] = {"size": []}
-            size = ep.get("episodeFile", {}).get("size", None)
+            size = (ep.get("episodeFile") or {}).get("size", None)
             sonarr_release_dict[release_group]["size"].append(size)
 
         if missing_eps > 0:
