@@ -13,7 +13,7 @@
   <WebUI/>
   <TemplateURL>https://raw.githubusercontent.com/gregoryn22/seadexarr/main/unraid/seadexarr-audit.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/bbtufty/seadexarr/main/docs/_static/seadexarr.png</Icon>
-  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <ExtraParams>--restart=unless-stopped --stop-timeout=120</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DateInstalled/>
@@ -21,7 +21,7 @@
   <DonateLink/>
   <Requires/>
 
-  <Config Name="Config Directory" Target="/config" Default="/mnt/user/appdata/seadexarr" Mode="rw" Description="Persistent config directory. Holds config.yml, cache.json, and audit_state.json." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/seadexarr</Config>
+  <Config Name="Config Directory" Target="/config" Default="/mnt/user/appdata/seadexarr" Mode="rw" Description="Persistent config directory. Holds config.yml, cache.json, and audit_state.db." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/seadexarr</Config>
 
   <Config Name="Run Mode" Target="RUN_MODE" Default="audit" Description="audit = run audit on a repeating schedule (recommended). audit-once = run once and exit. sync = original grab/sync mode." Type="Variable" Display="always" Required="true" Mask="false">audit</Config>
 

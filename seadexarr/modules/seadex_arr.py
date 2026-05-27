@@ -1186,7 +1186,7 @@ class SeaDexArr:
                             # Get Season, Episode, and size numbers for Sonarr and SeaDex
                             sonarr_ep_season = sonarr_ep.get("seasonNumber", 999)
                             sonarr_ep_episode = sonarr_ep.get("episodeNumber", 999)
-                            sonarr_ep_size = sonarr_ep.get("episodeFile", {}).get(
+                            sonarr_ep_size = (sonarr_ep.get("episodeFile") or {}).get(
                                 "size", None
                             )
 
@@ -1208,7 +1208,7 @@ class SeaDexArr:
                                 )
 
                                 # Check SeaDex release group matches the episode release group in Sonarr
-                                sonarr_rg = sonarr_ep.get("episodeFile", {}).get(
+                                sonarr_rg = (sonarr_ep.get("episodeFile") or {}).get(
                                     "releaseGroup", None
                                 )
 
