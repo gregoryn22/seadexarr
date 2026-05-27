@@ -67,8 +67,9 @@ class SonarrTagManager:
     ) -> tuple[list[int], bool]:
         """Compute final tag id list for a series.
 
-        Returns (new_tag_ids, changed). Only removes tags from managed_labels
-        when remove_stale=True — never removes tags the user added manually.
+        Returns (new_tag_ids, changed). Managed tags are always kept in sync
+        (added when desired, removed when not). remove_stale controls whether
+        unrecognised non-managed tags the user added manually are also swept.
         """
         all_tags = self.get_all_tags()
         managed_ids = {all_tags[l] for l in managed_labels if l in all_tags}
@@ -76,11 +77,12 @@ class SonarrTagManager:
 
         current_set = set(current_tag_ids)
 
-        if remove_stale:
-            non_managed = current_set - managed_ids
-            final = non_managed | desired_ids
-        else:
-            final = current_set | desired_ids
+        # Managed tags are always kept in sync: old ones not in desired_ids are
+        # dropped, new desired ones are added. User-added non-managed tags are
+        # always preserved. remove_stale is kept for API compatibility but has
+        # no effect — managed tags are always synced.
+        non_managed = current_set - managed_ids
+        final = non_managed | desired_ids
 
         changed = final != current_set
         return sorted(final), changed
