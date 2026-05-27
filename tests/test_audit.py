@@ -2,7 +2,8 @@
 Unit tests for audit mode.
 
 Tests cover status classification, state deduplication, tag diff logic,
-dry-run guards, and stale tag removal scoping.
+dry-run guards, stale tag removal scoping, SQLite persistence, JSON migration,
+and Discord diff generation.
 
 Run with: python -m pytest tests/test_audit.py -v
 """
@@ -11,10 +12,15 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 from seadexarr.modules.audit import AuditResult, SeaDexAudit
-from seadexarr.modules.audit_state import AuditState, SeriesAuditState, state_changed
+from seadexarr.modules.audit_state import (
+    AuditState,
+    SeriesAuditState,
+    rg_diff,
+    state_changed,
+)
 from seadexarr.modules.sonarr_tags import SonarrTagManager
 
 
@@ -45,6 +51,13 @@ def _make_state(**kwargs) -> SeriesAuditState:
     )
     defaults.update(kwargs)
     return SeriesAuditState(**defaults)
+
+
+def _tmp_db() -> str:
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(path)   # SQLite creates its own file
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -157,19 +170,19 @@ class TestStateDeduplication(unittest.TestCase):
         self.assertTrue(state_changed(old, new))
 
     def test_should_notify_first_seadex_match(self):
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            path = f.name
+        path = _tmp_db()
         try:
             state = AuditState(path)
             new = _make_state(seadex_status="full")
             cfg = {"notify_on_new_seadex_match": True}
             self.assertTrue(state.should_notify(new, cfg))
         finally:
-            os.unlink(path)
+            state.close()
+            if os.path.exists(path):
+                os.unlink(path)
 
     def test_should_not_notify_no_change(self):
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            path = f.name
+        path = _tmp_db()
         try:
             state = AuditState(path)
             existing = _make_state(seadex_status="full", upgrade_available=False)
@@ -178,11 +191,12 @@ class TestStateDeduplication(unittest.TestCase):
             cfg = {"notify_on_no_change": False}
             self.assertFalse(state.should_notify(new, cfg))
         finally:
-            os.unlink(path)
+            state.close()
+            if os.path.exists(path):
+                os.unlink(path)
 
     def test_should_notify_new_upgrade(self):
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            path = f.name
+        path = _tmp_db()
         try:
             state = AuditState(path)
             old = _make_state(seadex_status="full", upgrade_available=False)
@@ -191,23 +205,123 @@ class TestStateDeduplication(unittest.TestCase):
             cfg = {"notify_on_new_upgrade_available": True}
             self.assertTrue(state.should_notify(new, cfg))
         finally:
-            os.unlink(path)
+            state.close()
+            if os.path.exists(path):
+                os.unlink(path)
 
     def test_state_persists_across_load(self):
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            path = f.name
+        path = _tmp_db()
         try:
             state = AuditState(path)
             s = _make_state(sonarr_id=42, seadex_status="full")
             state.update_series(s)
-            state.save()
+            state.close()
 
             state2 = AuditState(path)
             loaded = state2.get_series(42)
             self.assertIsNotNone(loaded)
             self.assertEqual(loaded.seadex_status, "full")
+            state2.close()
         finally:
-            os.unlink(path)
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# SQLite-specific: migration from JSON
+# ---------------------------------------------------------------------------
+
+class TestJsonMigration(unittest.TestCase):
+
+    def test_migrates_from_legacy_json(self):
+        fd, json_path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        db_path = json_path[:-5] + ".db"
+        try:
+            # Write legacy JSON state
+            legacy = {
+                "schema_version": 1,
+                "series": {
+                    "7": {
+                        "sonarr_id": 7,
+                        "tvdb_id": 123,
+                        "title": "Migrated Show",
+                        "seadex_status": "full",
+                        "seadex_rgs": ["SubsPlease"],
+                        "seadex_size_bytes": 1000,
+                        "library_rgs": [],
+                        "upgrade_available": False,
+                        "too_large": False,
+                        "last_notified": None,
+                        "last_audited": "2024-01-01T00:00:00+00:00",
+                    }
+                },
+            }
+            with open(json_path, "w") as f:
+                json.dump(legacy, f)
+
+            # AuditState with .json path triggers migration
+            state = AuditState(json_path)
+            loaded = state.get_series(7)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.title, "Migrated Show")
+            self.assertEqual(loaded.seadex_rgs, ["SubsPlease"])
+            state.close()
+
+            # JSON file should have been renamed
+            self.assertFalse(os.path.exists(json_path))
+            self.assertTrue(os.path.exists(json_path + ".migrated"))
+        finally:
+            for p in (json_path, json_path + ".migrated", db_path):
+                if os.path.exists(p):
+                    os.unlink(p)
+
+    def test_empty_json_migrates_cleanly(self):
+        fd, json_path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        db_path = json_path[:-5] + ".db"
+        try:
+            # Empty JSON — should not crash
+            state = AuditState(json_path)
+            state.close()
+        finally:
+            for p in (json_path, json_path + ".migrated", db_path):
+                if os.path.exists(p):
+                    os.unlink(p)
+
+
+# ---------------------------------------------------------------------------
+# Release-group diff
+# ---------------------------------------------------------------------------
+
+class TestRgDiff(unittest.TestCase):
+
+    def test_no_old_state_all_rgs_are_added(self):
+        new = _make_state(seadex_rgs=["SubsPlease", "Erai-raws"])
+        added, removed = rg_diff(None, new)
+        self.assertEqual(set(added), {"SubsPlease", "Erai-raws"})
+        self.assertEqual(removed, [])
+
+    def test_rg_replaced(self):
+        old = _make_state(seadex_rgs=["Erai-raws"])
+        new = _make_state(seadex_rgs=["SubsPlease"])
+        added, removed = rg_diff(old, new)
+        self.assertIn("SubsPlease", added)
+        self.assertIn("Erai-raws", removed)
+
+    def test_no_change_empty_diff(self):
+        old = _make_state(seadex_rgs=["SubsPlease"])
+        new = _make_state(seadex_rgs=["SubsPlease"])
+        added, removed = rg_diff(old, new)
+        self.assertEqual(added, [])
+        self.assertEqual(removed, [])
+
+    def test_rg_added_without_removal(self):
+        old = _make_state(seadex_rgs=["SubsPlease"])
+        new = _make_state(seadex_rgs=["SubsPlease", "Erai-raws"])
+        added, removed = rg_diff(old, new)
+        self.assertIn("Erai-raws", added)
+        self.assertEqual(removed, [])
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +363,6 @@ class TestTagDiff(unittest.TestCase):
     def test_stale_managed_tag_removed_when_enabled(self):
         mgr = self._manager({"seadex": 1, "seadex-upgrade-available": 2})
         with patch.object(mgr, "get_or_create_tag", side_effect=lambda l: mgr._tag_cache.get(l, 99)):
-            # currently has both tags; desired is only seadex; stale removal ON
             new_ids, changed = mgr.compute_tag_changes(
                 current_tag_ids=[1, 2],
                 desired_labels=["seadex"],
@@ -270,12 +383,12 @@ class TestTagDiff(unittest.TestCase):
                 remove_stale=False,
             )
         self.assertIn(1, new_ids)
-        self.assertIn(2, new_ids)  # kept because remove_stale=False
+        self.assertIn(2, new_ids)
         self.assertFalse(changed)
 
     def test_user_tags_never_removed(self):
         mgr = self._manager({"seadex": 1})
-        user_tag_id = 99  # not in managed_labels
+        user_tag_id = 99
         with patch.object(mgr, "get_or_create_tag", side_effect=lambda l: mgr._tag_cache.get(l, 1)):
             new_ids, _ = mgr.compute_tag_changes(
                 current_tag_ids=[user_tag_id, 1],
@@ -306,7 +419,6 @@ class TestDryRun(unittest.TestCase):
         self.assertTrue(result)
 
     def test_audit_run_dry_run_does_not_call_set_series_tags(self):
-        """In dry_run mode, _apply_series_tags must not call set_series_tags."""
         audit = SeaDexAudit.__new__(SeaDexAudit)
         audit.tag_full = "seadex"
         audit.tag_partial = "partial-seadex"
@@ -356,9 +468,39 @@ class TestStaleTagRemoval(unittest.TestCase):
                 remove_stale=True,
             )
 
-        self.assertIn(10, new_ids)     # desired
-        self.assertNotIn(20, new_ids)  # stale managed, removed
-        self.assertIn(arbitrary_user_tag, new_ids)  # user tag, kept
+        self.assertIn(10, new_ids)
+        self.assertNotIn(20, new_ids)
+        self.assertIn(arbitrary_user_tag, new_ids)
+
+
+# ---------------------------------------------------------------------------
+# Embed colour helper
+# ---------------------------------------------------------------------------
+
+class TestEmbedColour(unittest.TestCase):
+
+    def _audit(self):
+        return SeaDexAudit.__new__(SeaDexAudit)
+
+    def test_too_large_colour(self):
+        from seadexarr.modules.audit import _COLOUR_TOO_LARGE
+        r = _make_result(seadex_status="full", upgrade_available=True, too_large=True)
+        self.assertEqual(SeaDexAudit._embed_colour(r), _COLOUR_TOO_LARGE)
+
+    def test_upgrade_colour(self):
+        from seadexarr.modules.audit import _COLOUR_UPGRADE
+        r = _make_result(seadex_status="full", upgrade_available=True, too_large=False)
+        self.assertEqual(SeaDexAudit._embed_colour(r), _COLOUR_UPGRADE)
+
+    def test_full_colour(self):
+        from seadexarr.modules.audit import _COLOUR_FULL
+        r = _make_result(seadex_status="full", upgrade_available=False)
+        self.assertEqual(SeaDexAudit._embed_colour(r), _COLOUR_FULL)
+
+    def test_partial_colour(self):
+        from seadexarr.modules.audit import _COLOUR_PARTIAL
+        r = _make_result(seadex_status="partial")
+        self.assertEqual(SeaDexAudit._embed_colour(r), _COLOUR_PARTIAL)
 
 
 if __name__ == "__main__":
