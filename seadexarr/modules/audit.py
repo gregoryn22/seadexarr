@@ -5,6 +5,8 @@ Scans Sonarr, classifies SeaDex coverage, applies tags, sends Discord
 notifications. Never calls add_torrent() or any torrent-client method.
 """
 
+import signal
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -120,6 +122,21 @@ class SeaDexAudit(SeaDexSonarr):
             effective_dry_run = self.audit_dry_run
         dry_run = effective_dry_run
 
+        # Graceful shutdown: SIGTERM/SIGINT finishes the current series then exits.
+        _shutdown = threading.Event()
+
+        def _handle_signal(sig, frame):
+            self.logger.warning(
+                left_aligned_string(
+                    "Shutdown signal received — finishing current series then saving state.",
+                    total_length=self.log_line_length,
+                )
+            )
+            _shutdown.set()
+
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT, _handle_signal)
+
         all_series = self.get_all_sonarr_series()
         n_total = len(all_series)
 
@@ -142,6 +159,15 @@ class SeaDexAudit(SeaDexSonarr):
         old_states: dict[int, Optional[SeriesAuditState]] = {}
 
         for idx, series in enumerate(all_series):
+            if _shutdown.is_set():
+                self.logger.info(
+                    left_aligned_string(
+                        f"Audit interrupted after {idx}/{n_total} series.",
+                        total_length=self.log_line_length,
+                    )
+                )
+                break
+
             self.log_arr_item_start(
                 arr="sonarr",
                 item_title=series.title,
