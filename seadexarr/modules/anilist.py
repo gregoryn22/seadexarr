@@ -1,8 +1,11 @@
 import copy
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 API_URL = "https://graphql.anilist.co"
+_TIMEOUT = 30
 
 # AniList query
 QUERY = """
@@ -25,20 +28,43 @@ query ($id: Int) {
 """
 
 
+def _make_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=2,
+        backoff_factor=1,
+        allowed_methods={"POST"},
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+_SESSION = _make_session()
+
+
 def get_query(al_id):
     """Do the AniList query
 
     Args:
         al_id (int): Anilist ID
+
+    Raises:
+        requests.exceptions.RequestException: on network failure after retries
     """
 
-    # Define query variables and values that will be used in the query request
     variables = {"id": al_id}
-
-    resp = requests.post(API_URL, json={"query": QUERY, "variables": variables})
-    j = resp.json()
-
-    return j
+    resp = _SESSION.post(
+        API_URL,
+        json={"query": QUERY, "variables": variables},
+        timeout=_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _media(j: dict) -> dict:
@@ -70,7 +96,10 @@ def get_anilist_n_eps(
 
     # If we don't have it, do the query
     if j is None:
-        j = get_query(al_id)
+        try:
+            j = get_query(al_id)
+        except requests.exceptions.RequestException:
+            return None, al_cache
         al_cache[al_id] = copy.deepcopy(j)
 
     # Pull out number of episodes
@@ -98,7 +127,10 @@ def get_anilist_title(
 
     # If we don't have it, do the query
     if j is None:
-        j = get_query(al_id)
+        try:
+            j = get_query(al_id)
+        except requests.exceptions.RequestException:
+            return None, al_cache
         al_cache[al_id] = copy.deepcopy(j)
 
     # Prefer the english title, but fall back to romaji
@@ -127,7 +159,10 @@ def get_anilist_thumb(
 
     # If we don't have it, do the query
     if j is None:
-        j = get_query(al_id)
+        try:
+            j = get_query(al_id)
+        except requests.exceptions.RequestException:
+            return None, al_cache
         al_cache[al_id] = copy.deepcopy(j)
 
     thumb = (_media(j).get("coverImage") or {}).get("large", None)
@@ -154,7 +189,10 @@ def get_anilist_format(
 
     # If we don't have it, do the query
     if j is None:
-        j = get_query(al_id)
+        try:
+            j = get_query(al_id)
+        except requests.exceptions.RequestException:
+            return None, al_cache
         al_cache[al_id] = copy.deepcopy(j)
 
     al_format = _media(j).get("format", None)
