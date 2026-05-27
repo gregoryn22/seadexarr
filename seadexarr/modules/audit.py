@@ -12,12 +12,19 @@ from typing import Optional
 from discordwebhook import Discord
 
 from .anilist import get_anilist_thumb
-from .audit_state import AuditState, SeriesAuditState
+from .audit_state import AuditState, SeriesAuditState, rg_diff, state_changed
 from .log import centred_string, left_aligned_string
 from .seadex_sonarr import SeaDexSonarr
 from .sonarr_tags import SonarrTagManager
 
 BYTES_PER_GB = 1_073_741_824
+
+# Discord embed colours
+_COLOUR_FULL = 0x2ECC71      # green
+_COLOUR_PARTIAL = 0xF1C40F   # yellow
+_COLOUR_UPGRADE = 0xE67E22   # orange
+_COLOUR_TOO_LARGE = 0xE74C3C # red
+_COLOUR_NONE = 0x95A5A6      # grey
 
 
 @dataclass
@@ -76,7 +83,7 @@ class SeaDexAudit(SeaDexSonarr):
 
         state_cfg = audit_cfg.get("state", {}) or {}
         self.state_enabled: bool = state_cfg.get("enabled", True)
-        state_path: str = state_cfg.get("path") or "/config/audit_state.json"
+        state_path: str = state_cfg.get("path") or "/config/audit_state.db"
         self.audit_state: Optional[AuditState] = (
             AuditState(state_path) if self.state_enabled else None
         )
@@ -131,6 +138,8 @@ class SeaDexAudit(SeaDexSonarr):
         }
 
         results: list[AuditResult] = []
+        # old_states keyed by sonarr_id — captured before any update_series call
+        old_states: dict[int, Optional[SeriesAuditState]] = {}
 
         for idx, series in enumerate(all_series):
             self.log_arr_item_start(
@@ -139,6 +148,10 @@ class SeaDexAudit(SeaDexSonarr):
                 n_item=idx + 1,
                 n_items=n_total,
             )
+
+            # Snapshot old state before this audit run
+            if self.audit_state is not None:
+                old_states[series.id] = self.audit_state.get_series(series.id)
 
             result = self._audit_series(series)
             results.append(result)
@@ -161,7 +174,6 @@ class SeaDexAudit(SeaDexSonarr):
 
             self._log_result(result)
 
-            # Determine notification need
             if self.audit_state is not None:
                 result.notify = self.audit_state.should_notify(
                     new_state=self._to_state(result),
@@ -185,10 +197,10 @@ class SeaDexAudit(SeaDexSonarr):
         to_notify = [r for r in results if r.notify and r.seadex_status != "none"]
         if to_notify and (self.audit_notify_discord or notify_only) and self.discord_url:
             if self.discord_cfg.get("batch_notifications", True):
-                self._send_batch_discord(to_notify)
+                self._send_batch_discord(to_notify, old_states)
             else:
                 for r in to_notify:
-                    self._send_single_discord(r)
+                    self._send_single_discord(r, old_states.get(r.sonarr_id))
             stats["notified"] = len(to_notify)
 
         # Persist state
@@ -228,7 +240,6 @@ class SeaDexAudit(SeaDexSonarr):
             if not al_mappings:
                 return result
 
-            # Evaluate each AniList mapping; aggregate to series-level result
             per_al: list[dict] = []
             for al_id, mapping in al_mappings.items():
                 if al_id is None:
@@ -238,18 +249,32 @@ class SeaDexAudit(SeaDexSonarr):
             if not per_al:
                 return result
 
-            # Consolidate: propagate the most informative status upward
             STATUS_ORDER = ["none", "partial", "full"]
 
-            best = max(per_al, key=lambda d: STATUS_ORDER.index(d["seadex_status"]))
-            result.al_id = best["al_id"]
-            result.sd_url = best["sd_url"]
-            result.anilist_title = best["anilist_title"]
-            result.seadex_status = best["seadex_status"]
-            result.seadex_rgs = best["seadex_rgs"]
-            result.seadex_size_bytes = best["seadex_size_bytes"]
-            result.library_rgs = best["library_rgs"]
-            result.library_size_bytes = best["library_size_bytes"]
+            best_status = max(
+                per_al, key=lambda d: STATUS_ORDER.index(d["seadex_status"])
+            )["seadex_status"]
+
+            # Pick representative entry for URL/title from the highest-status group
+            top_entries = [d for d in per_al if d["seadex_status"] == best_status]
+            representative = top_entries[0]
+
+            result.al_id = representative["al_id"]
+            result.sd_url = representative["sd_url"]
+            result.anilist_title = representative["anilist_title"]
+            result.seadex_status = best_status
+
+            # Union RGs across ALL top-status entries so per-entry changes are
+            # detected even when the aggregate status doesn't change.
+            result.seadex_rgs = sorted(
+                {rg for d in top_entries for rg in d["seadex_rgs"]}
+            )
+            result.seadex_size_bytes = max(
+                (d["seadex_size_bytes"] for d in top_entries), default=0
+            )
+            result.library_rgs = representative["library_rgs"]
+            result.library_size_bytes = representative["library_size_bytes"]
+
             result.upgrade_available = any(d["upgrade_available"] for d in per_al)
             result.too_large = any(d["too_large"] for d in per_al)
             result.desired_tags = self._compute_desired_tags(result)
@@ -266,7 +291,6 @@ class SeaDexAudit(SeaDexSonarr):
         return result
 
     def _audit_al_id(self, sonarr_series, al_id: int, mapping: dict) -> dict:
-        """Audit a single AniList ID for a Sonarr series."""
         out: dict = {
             "al_id": al_id,
             "sd_url": None,
@@ -305,7 +329,6 @@ class SeaDexAudit(SeaDexSonarr):
         seadex_dict = self.get_seadex_dict(sd_entry=sd_entry)
 
         if len(seadex_dict) == 0:
-            # SeaDex entry exists but nothing passes user filters → partial
             out["seadex_status"] = "partial"
             return out
 
@@ -313,7 +336,6 @@ class SeaDexAudit(SeaDexSonarr):
         out["seadex_rgs"] = list(seadex_dict.keys())
         out["seadex_size_bytes"] = self._sum_seadex_size(seadex_dict)
 
-        # Check upgrade
         seadex_dict = self.parse_episodes_from_seadex(seadex_dict=seadex_dict)
         _, seadex_dict = self.filter_seadex_downloads(
             al_id=al_id,
@@ -324,7 +346,6 @@ class SeaDexAudit(SeaDexSonarr):
         )
         out["upgrade_available"] = self.get_any_to_download(seadex_dict=seadex_dict)
 
-        # Size check
         if out["upgrade_available"] and self.size_filter_enabled:
             sd_gb = out["seadex_size_bytes"] / BYTES_PER_GB
             lib_bytes = out["library_size_bytes"]
@@ -395,7 +416,19 @@ class SeaDexAudit(SeaDexSonarr):
     # Discord
     # ------------------------------------------------------------------
 
-    def _send_single_discord(self, result: AuditResult):
+    @staticmethod
+    def _embed_colour(result: AuditResult) -> int:
+        if result.too_large:
+            return _COLOUR_TOO_LARGE
+        if result.upgrade_available:
+            return _COLOUR_UPGRADE
+        if result.seadex_status == "full":
+            return _COLOUR_FULL
+        if result.seadex_status == "partial":
+            return _COLOUR_PARTIAL
+        return _COLOUR_NONE
+
+    def _send_single_discord(self, result: AuditResult, old_state: Optional[SeriesAuditState]):
         if not self.discord_url:
             return
 
@@ -403,11 +436,39 @@ class SeaDexAudit(SeaDexSonarr):
         lib_gb = result.library_size_bytes / BYTES_PER_GB
         delta_gb = sd_gb - lib_gb
 
+        old_s = old_state  # may be None on first ever audit
+        added_rgs, removed_rgs = rg_diff(old_s, self._to_state(result))
+
+        # Status transition label
+        old_status = old_s.seadex_status if old_s else "new"
+        new_status = result.seadex_status.capitalize()
+        if old_s and old_s.seadex_status != result.seadex_status:
+            status_label = f"{old_status.capitalize()} → {new_status}"
+        else:
+            status_label = new_status
+
         fields = [
-            {"name": "Coverage", "value": result.seadex_status.capitalize(), "inline": True},
-            {"name": "Current", "value": ", ".join(result.library_rgs) or "None", "inline": True},
-            {"name": "SeaDex", "value": ", ".join(result.seadex_rgs) or "None", "inline": True},
+            {"name": "Coverage", "value": status_label, "inline": True},
+            {
+                "name": "Library",
+                "value": ", ".join(result.library_rgs) or "None",
+                "inline": True,
+            },
+            {
+                "name": "SeaDex",
+                "value": ", ".join(result.seadex_rgs) or "None",
+                "inline": True,
+            },
         ]
+
+        # Release-group diff field — only when something actually changed
+        if added_rgs or removed_rgs:
+            diff_parts = [f"+{rg}" for rg in added_rgs] + [f"-{rg}" for rg in removed_rgs]
+            fields.append({
+                "name": "Changes",
+                "value": "  ".join(diff_parts),
+                "inline": False,
+            })
 
         if result.upgrade_available:
             size_str = f"{sd_gb:.1f} GB ({delta_gb:+.1f} GB vs current)"
@@ -439,12 +500,17 @@ class SeaDexAudit(SeaDexSonarr):
             },
             "title": result.anilist_title or result.sonarr_title,
             "description": result.sd_url or "",
+            "color": self._embed_colour(result),
             "fields": fields,
             "thumbnail": {"url": anilist_thumb},
         }])
         time.sleep(1)
 
-    def _send_batch_discord(self, results: list[AuditResult]):
+    def _send_batch_discord(
+        self,
+        results: list[AuditResult],
+        old_states: dict[int, Optional[SeriesAuditState]],
+    ):
         if not self.discord_url or not results:
             return
 
@@ -457,11 +523,17 @@ class SeaDexAudit(SeaDexSonarr):
                 lib_gb = r.library_size_bytes / BYTES_PER_GB
                 delta_gb = sd_gb - lib_gb
 
+                old_s = old_states.get(r.sonarr_id)
+                added_rgs, removed_rgs = rg_diff(old_s, self._to_state(r))
+
                 parts = [f"Coverage: {r.seadex_status.capitalize()}"]
                 if r.library_rgs:
-                    parts.append(f"Current: {', '.join(r.library_rgs)}")
+                    parts.append(f"Library: {', '.join(r.library_rgs)}")
                 if r.seadex_rgs:
                     parts.append(f"SeaDex: {', '.join(r.seadex_rgs)}")
+                if added_rgs or removed_rgs:
+                    diff_parts = [f"+{rg}" for rg in added_rgs] + [f"-{rg}" for rg in removed_rgs]
+                    parts.append(f"Changes: {' '.join(diff_parts)}")
                 if r.upgrade_available:
                     flag = " ⚠ Too Large" if r.too_large else " ↑ Upgrade"
                     parts.append(f"Size: {sd_gb:.1f} GB ({delta_gb:+.1f} GB){flag}")
@@ -470,6 +542,7 @@ class SeaDexAudit(SeaDexSonarr):
                     "author": {"name": "SeaDexArr Audit"},
                     "title": r.anilist_title or r.sonarr_title,
                     "description": "\n".join(parts),
+                    "color": self._embed_colour(r),
                     "url": r.sd_url or "",
                 })
 
