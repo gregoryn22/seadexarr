@@ -115,7 +115,7 @@ def run_single(
     config = os.path.join(config_dir, "config.yml")
     cache = os.path.join(config_dir, "cache.json")
 
-    logger = setup_logger(log_level="INFO")
+    logger = setup_logger(log_level=os.getenv("LOG_LEVEL", "INFO"))
 
     if radarr:
         try:
@@ -175,7 +175,7 @@ def run_audit(
     config = os.path.join(config_dir, "config.yml")
     cache = os.path.join(config_dir, "cache.json")
 
-    logger = setup_logger(log_level="INFO")
+    logger = setup_logger(log_level=os.getenv("LOG_LEVEL", "INFO"))
 
     try:
         sda = SeaDexAudit(config=config, cache=cache, logger=logger)
