@@ -503,5 +503,89 @@ class TestEmbedColour(unittest.TestCase):
         self.assertEqual(SeaDexAudit._embed_colour(r), _COLOUR_PARTIAL)
 
 
+# ---------------------------------------------------------------------------
+# alt_is_acceptable
+# ---------------------------------------------------------------------------
+
+class TestAltIsAcceptable(unittest.TestCase):
+
+    def _make_audit(self, alt_is_acceptable=False):
+        audit = SeaDexAudit.__new__(SeaDexAudit)
+        audit.alt_is_acceptable = alt_is_acceptable
+        audit.size_filter_enabled = False
+        audit.ignore_tags = []
+        audit.trackers = ["animetosho"]
+        audit.public_only = False
+        audit.log_line_length = 80
+        audit.logger = MagicMock()
+        audit.al_cache = {}
+        return audit
+
+    def _make_torrent(self, release_group, is_best, tracker="animetosho"):
+        t = MagicMock()
+        t.release_group = release_group
+        t.is_best = is_best
+        t.tags = []
+        t.tracker = MagicMock()
+        t.tracker.lower.return_value = tracker
+        t.tracker.is_public.return_value = True
+        t.url = f"https://example.com/{release_group}"
+        t.files = []
+        t.infohash = "abc123"
+        t.is_dual_audio = False
+        return t
+
+    def _run(self, audit, library_rgs, sd_torrents):
+        mock_series = MagicMock()
+        mock_series.id = 1
+        mock_series.title = "Test Show"
+
+        mock_sd_entry = MagicMock()
+        mock_sd_entry.url = "https://seadex.moe/test"
+        mock_sd_entry.torrents = sd_torrents
+
+        release_dict = {rg: {"size": [1_000_000_000]} for rg in library_rgs}
+        seadex_dict = {"BestGroup": {"urls": {}}}
+
+        with patch.object(audit, "get_seadex_entry", return_value=mock_sd_entry), \
+             patch.object(audit, "get_anilist_title", return_value="Test Show"), \
+             patch.object(audit, "get_ep_list", return_value=[]), \
+             patch.object(audit, "get_sonarr_release_dict", return_value=release_dict), \
+             patch.object(audit, "get_seadex_dict", return_value=seadex_dict), \
+             patch.object(audit, "_sum_seadex_size", return_value=2_000_000_000), \
+             patch.object(audit, "parse_episodes_from_seadex", return_value=seadex_dict), \
+             patch.object(audit, "filter_seadex_downloads", return_value=(True, seadex_dict)), \
+             patch.object(audit, "get_any_to_download", return_value=True):
+            return audit._audit_al_id(mock_series, 12345, {})
+
+    def test_alt_acceptable_library_has_alt_clears_upgrade(self):
+        audit = self._make_audit(alt_is_acceptable=True)
+        torrents = [
+            self._make_torrent("BestGroup", is_best=True),
+            self._make_torrent("AltGroup", is_best=False),
+        ]
+        result = self._run(audit, library_rgs=["AltGroup"], sd_torrents=torrents)
+        self.assertFalse(result["upgrade_available"])
+        self.assertFalse(result["too_large"])
+
+    def test_alt_not_acceptable_upgrade_stays(self):
+        audit = self._make_audit(alt_is_acceptable=False)
+        torrents = [
+            self._make_torrent("BestGroup", is_best=True),
+            self._make_torrent("AltGroup", is_best=False),
+        ]
+        result = self._run(audit, library_rgs=["AltGroup"], sd_torrents=torrents)
+        self.assertTrue(result["upgrade_available"])
+
+    def test_library_not_in_seadex_upgrade_stays(self):
+        audit = self._make_audit(alt_is_acceptable=True)
+        torrents = [
+            self._make_torrent("BestGroup", is_best=True),
+            self._make_torrent("AltGroup", is_best=False),
+        ]
+        result = self._run(audit, library_rgs=["SomeRandomGroup"], sd_torrents=torrents)
+        self.assertTrue(result["upgrade_available"])
+
+
 if __name__ == "__main__":
     unittest.main()

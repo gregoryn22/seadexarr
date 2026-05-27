@@ -64,6 +64,11 @@ audit:
     too_large: seadex-too-large
     ignored: seadex-ignored
 
+  # If true, having any SeaDex-listed release (best OR alt) is considered
+  # acceptable — series won't be flagged for upgrade just because a "best"
+  # release exists when you already have an "alt" one.
+  alt_is_acceptable: false
+
   size_filters:
     enabled: true
     max_absolute_gb: 80

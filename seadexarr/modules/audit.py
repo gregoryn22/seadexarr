@@ -80,6 +80,7 @@ class SeaDexAudit(SeaDexSonarr):
         self.max_absolute_gb: float = size_cfg.get("max_absolute_gb", 80)
         self.max_size_multiplier: float = size_cfg.get("max_size_multiplier", 2.0)
         self.tag_when_too_large: bool = size_cfg.get("tag_when_too_large", True)
+        self.alt_is_acceptable: bool = audit_cfg.get("alt_is_acceptable", False)
 
         self.discord_cfg: dict = audit_cfg.get("discord", {}) or {}
 
@@ -309,6 +310,7 @@ class SeaDexAudit(SeaDexSonarr):
             result.desired_tags = self._compute_desired_tags(result)
 
         except Exception as e:
+            import traceback as _tb
             result.error = str(e)
             self.logger.error(
                 left_aligned_string(
@@ -316,6 +318,9 @@ class SeaDexAudit(SeaDexSonarr):
                     total_length=self.log_line_length,
                 )
             )
+            for tb_line in _tb.format_exc().splitlines():
+                if tb_line.strip():
+                    self.logger.error(f"  {tb_line}")
 
         return result
 
@@ -381,6 +386,21 @@ class SeaDexAudit(SeaDexSonarr):
             ratio = (out["seadex_size_bytes"] / lib_bytes) if lib_bytes > 0 else 0
             if sd_gb > self.max_absolute_gb or ratio > self.max_size_multiplier:
                 out["too_large"] = True
+
+        # If alt releases are acceptable and the library already has any
+        # SeaDex-listed release (best OR alt), don't flag for upgrade.
+        if (out["upgrade_available"] or out["too_large"]) and self.alt_is_acceptable:
+            all_candidates = [
+                t for t in sd_entry.torrents
+                if not set(self.ignore_tags) & set(t.tags)
+                and t.tracker.lower() in self.trackers
+            ]
+            if self.public_only:
+                all_candidates = [t for t in all_candidates if t.tracker.is_public()]
+            all_sd_rgs = {t.release_group for t in all_candidates}
+            if set(out["library_rgs"]) & all_sd_rgs:
+                out["upgrade_available"] = False
+                out["too_large"] = False
 
         return out
 
@@ -586,8 +606,8 @@ class SeaDexAudit(SeaDexSonarr):
     def _sum_seadex_size(self, seadex_dict: dict) -> int:
         total = 0
         for rg_data in seadex_dict.values():
-            for url_data in rg_data.get("urls", {}).values():
-                sizes = url_data.get("size", []) or []
+            for url_data in (rg_data.get("urls") or {}).values():
+                sizes = (url_data or {}).get("size", []) or []
                 total += sum(s for s in sizes if s)
         return total
 
