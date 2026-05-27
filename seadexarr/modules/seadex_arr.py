@@ -381,12 +381,16 @@ class SeaDexArr:
 
         return True
 
+    def _mappings_dir(self):
+        if os.environ.get("DOCKER_ENV"):
+            return os.environ.get("CONFIG_DIR", "/config")
+        return os.getcwd()
+
     def get_anime_mappings(self):
         """Get the anime IDs file"""
 
-        anime_mappings_file = os.path.join("anime_ids.json")
+        anime_mappings_file = os.path.join(self._mappings_dir(), "anime_ids.json")
 
-        # If a file doesn't exist, get it
         self.get_external_mappings(
             f=anime_mappings_file,
             url=ANIME_IDS_URL,
@@ -400,9 +404,8 @@ class SeaDexArr:
     def get_anidb_mappings(self):
         """Get the AniDB mappings file"""
 
-        anidb_mappings_file = os.path.join("anime-list-master.xml")
+        anidb_mappings_file = os.path.join(self._mappings_dir(), "anime-list-master.xml")
 
-        # If a file doesn't exist, get it
         self.get_external_mappings(
             f=anidb_mappings_file,
             url=ANIDB_MAPPINGS_URL,
@@ -415,9 +418,8 @@ class SeaDexArr:
     def get_anibridge_mappings(self):
         """Get PlexAniBridge mappings file"""
 
-        anibridge_mappings_file = os.path.join("anibridge_mappings.json")
+        anibridge_mappings_file = os.path.join(self._mappings_dir(), "anibridge_mappings.json")
 
-        # If a file doesn't exist, get it
         self.get_external_mappings(
             f=anibridge_mappings_file,
             url=ANIBRIDGE_MAPPINGS_URL,
