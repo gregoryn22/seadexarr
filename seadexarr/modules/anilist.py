@@ -41,6 +41,16 @@ def get_query(al_id):
     return j
 
 
+def _media(j: dict) -> dict:
+    """Safely extract the Media object from an AniList response.
+
+    AniList returns {"data": null} for removed/incomplete entries.
+    dict.get(key, {}) only uses the default when the key is absent,
+    not when it exists with a null value — so we use `or {}` guards.
+    """
+    return ((j.get("data") or {}).get("Media") or {})
+
+
 def get_anilist_n_eps(
     al_id,
     al_cache=None,
@@ -64,7 +74,7 @@ def get_anilist_n_eps(
         al_cache[al_id] = copy.deepcopy(j)
 
     # Pull out number of episodes
-    n_eps = j.get("data", {}).get("Media", {}).get("episodes", None)
+    n_eps = _media(j).get("episodes", None)
 
     return n_eps, al_cache
 
@@ -92,9 +102,8 @@ def get_anilist_title(
         al_cache[al_id] = copy.deepcopy(j)
 
     # Prefer the english title, but fall back to romaji
-    title = j.get("data", {}).get("Media", {}).get("title", {}).get("english", None)
-    if title is None:
-        title = j.get("data", {}).get("Media", {}).get("title", {}).get("romaji", None)
+    title_obj = (_media(j).get("title") or {})
+    title = title_obj.get("english") or title_obj.get("romaji")
 
     return title, al_cache
 
@@ -121,7 +130,7 @@ def get_anilist_thumb(
         j = get_query(al_id)
         al_cache[al_id] = copy.deepcopy(j)
 
-    thumb = j.get("data", {}).get("Media", {}).get("coverImage", {}).get("large", None)
+    thumb = (_media(j).get("coverImage") or {}).get("large", None)
 
     return thumb, al_cache
 
@@ -148,6 +157,6 @@ def get_anilist_format(
         j = get_query(al_id)
         al_cache[al_id] = copy.deepcopy(j)
 
-    al_format = j.get("data", {}).get("Media", {}).get("format", None)
+    al_format = _media(j).get("format", None)
 
     return al_format, al_cache
