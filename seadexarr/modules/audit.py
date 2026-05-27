@@ -122,8 +122,9 @@ class SeaDexAudit(SeaDexSonarr):
             effective_dry_run = self.audit_dry_run
         dry_run = effective_dry_run
 
-        # Graceful shutdown: SIGTERM/SIGINT finishes the current series then exits.
-        _shutdown = threading.Event()
+        # Graceful shutdown: SIGTERM/SIGINT finishes the current al_id then exits.
+        # Stored on self so _audit_series can check between al_id iterations.
+        self._shutdown = threading.Event()
 
         def _handle_signal(sig, frame):
             self.logger.warning(
@@ -132,7 +133,7 @@ class SeaDexAudit(SeaDexSonarr):
                     total_length=self.log_line_length,
                 )
             )
-            _shutdown.set()
+            self._shutdown.set()
 
         signal.signal(signal.SIGTERM, _handle_signal)
         signal.signal(signal.SIGINT, _handle_signal)
@@ -159,7 +160,7 @@ class SeaDexAudit(SeaDexSonarr):
         old_states: dict[int, Optional[SeriesAuditState]] = {}
 
         for idx, series in enumerate(all_series):
-            if _shutdown.is_set():
+            if self._shutdown.is_set():
                 self.logger.info(
                     left_aligned_string(
                         f"Audit interrupted after {idx}/{n_total} series.",
@@ -268,6 +269,8 @@ class SeaDexAudit(SeaDexSonarr):
 
             per_al: list[dict] = []
             for al_id, mapping in al_mappings.items():
+                if getattr(self, "_shutdown", None) and self._shutdown.is_set():
+                    break
                 if al_id is None:
                     continue
                 per_al.append(self._audit_al_id(sonarr_series, al_id, mapping))
