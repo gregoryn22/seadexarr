@@ -906,8 +906,8 @@ class SeaDexArr:
 
             # Check if we're actually downloading anything
             dl = [
-                srg_item.get("urls", {}).get(x, {}).get("download", False)
-                for x in srg_item["urls"]
+                ((srg_item.get("urls") or {}).get(x) or {}).get("download", False)
+                for x in (srg_item.get("urls") or {})
             ]
 
             if any(dl):
@@ -1778,8 +1778,8 @@ class SeaDexArr:
         for srg, srg_item in seadex_dict.items():
 
             dl = [
-                srg_item.get("urls", {}).get(x, {}).get("download", False)
-                for x in srg_item.get("urls", {})
+                ((srg_item.get("urls") or {}).get(x) or {}).get("download", False)
+                for x in (srg_item.get("urls") or {})
             ]
             if any(dl):
                 self.logger.info(
@@ -1799,7 +1799,7 @@ class SeaDexArr:
                 for url in srg_item.get("urls", {}):
 
                     download = (
-                        srg_item.get("url", {}).get(url, {}).get("download", False)
+                        ((srg_item.get("urls") or {}).get(url) or {}).get("download", False)
                     )
                     if download:
                         self.logger.info(

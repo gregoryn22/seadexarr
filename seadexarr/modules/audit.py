@@ -309,6 +309,7 @@ class SeaDexAudit(SeaDexSonarr):
             result.desired_tags = self._compute_desired_tags(result)
 
         except Exception as e:
+            import traceback as _tb
             result.error = str(e)
             self.logger.error(
                 left_aligned_string(
@@ -316,7 +317,9 @@ class SeaDexAudit(SeaDexSonarr):
                     total_length=self.log_line_length,
                 )
             )
-            self.logger.debug("Full traceback:", exc_info=True)
+            for tb_line in _tb.format_exc().splitlines():
+                if tb_line.strip():
+                    self.logger.error(f"  {tb_line}")
 
         return result
 
@@ -587,8 +590,8 @@ class SeaDexAudit(SeaDexSonarr):
     def _sum_seadex_size(self, seadex_dict: dict) -> int:
         total = 0
         for rg_data in seadex_dict.values():
-            for url_data in rg_data.get("urls", {}).values():
-                sizes = url_data.get("size", []) or []
+            for url_data in (rg_data.get("urls") or {}).values():
+                sizes = (url_data or {}).get("size", []) or []
                 total += sum(s for s in sizes if s)
         return total
 
