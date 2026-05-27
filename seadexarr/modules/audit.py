@@ -47,6 +47,7 @@ class SeaDexAudit(SeaDexSonarr):
         super().__init__(config=config, cache=cache, logger=logger)
 
         audit_cfg = self.config.get("audit", {}) or {}
+        self.audit_dry_run: bool = audit_cfg.get("dry_run", True)
         self.audit_notify_discord: bool = audit_cfg.get("notify_discord", True)
         self.audit_update_tags: bool = audit_cfg.get("update_sonarr_tags", True)
         self.audit_remove_stale: bool = audit_cfg.get("remove_stale_tags", False)
@@ -99,9 +100,19 @@ class SeaDexAudit(SeaDexSonarr):
 
         Args:
             dry_run: Log intended changes only; no Sonarr or state mutations.
-            apply_tags: Apply computed Sonarr tags (overrides audit.dry_run).
+            apply_tags: Explicitly override config dry_run and apply tags.
             notify_only: Send Discord notifications without changing tags.
         """
+        # Config dry_run is the safety default. --apply-tags overrides it;
+        # --dry-run always wins regardless of config.
+        if dry_run:
+            effective_dry_run = True
+        elif apply_tags:
+            effective_dry_run = False
+        else:
+            effective_dry_run = self.audit_dry_run
+        dry_run = effective_dry_run
+
         all_series = self.get_all_sonarr_series()
         n_total = len(all_series)
 
