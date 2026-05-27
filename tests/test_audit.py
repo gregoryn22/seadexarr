@@ -373,7 +373,9 @@ class TestTagDiff(unittest.TestCase):
         self.assertNotIn(2, new_ids)
         self.assertTrue(changed)
 
-    def test_stale_managed_tag_not_removed_when_disabled(self):
+    def test_stale_managed_tag_removed_regardless_of_remove_stale(self):
+        # Managed tags are always kept in sync — remove_stale=False should
+        # no longer preserve a managed tag that is no longer desired.
         mgr = self._manager({"seadex": 1, "seadex-upgrade-available": 2})
         with patch.object(mgr, "get_or_create_tag", side_effect=lambda l: mgr._tag_cache.get(l, 99)):
             new_ids, changed = mgr.compute_tag_changes(
@@ -383,8 +385,8 @@ class TestTagDiff(unittest.TestCase):
                 remove_stale=False,
             )
         self.assertIn(1, new_ids)
-        self.assertIn(2, new_ids)
-        self.assertFalse(changed)
+        self.assertNotIn(2, new_ids)
+        self.assertTrue(changed)
 
     def test_user_tags_never_removed(self):
         mgr = self._manager({"seadex": 1})
@@ -585,6 +587,31 @@ class TestAltIsAcceptable(unittest.TestCase):
         ]
         result = self._run(audit, library_rgs=["SomeRandomGroup"], sd_torrents=torrents)
         self.assertTrue(result["upgrade_available"])
+
+    def test_alt_acceptable_public_only_filters_private_tracker(self):
+        """With public_only=True, private-tracker-only alts don't suppress upgrade."""
+        audit = self._make_audit(alt_is_acceptable=True)
+        audit.public_only = True
+        audit.trackers = ["nyaa", "animetosho"]
+
+        best = self._make_torrent("BestGroup", is_best=True, tracker="nyaa")
+        alt_private = self._make_torrent("AltGroup", is_best=False, tracker="ab")
+        alt_private.tracker.is_public.return_value = False
+
+        result = self._run(audit, library_rgs=["AltGroup"], sd_torrents=[best, alt_private])
+        self.assertTrue(result["upgrade_available"])
+
+    def test_alt_acceptable_public_only_public_alt_clears_upgrade(self):
+        """With public_only=True, a public-tracker alt in the library suppresses upgrade."""
+        audit = self._make_audit(alt_is_acceptable=True)
+        audit.public_only = True
+        audit.trackers = ["nyaa", "animetosho"]
+
+        best = self._make_torrent("BestGroup", is_best=True, tracker="nyaa")
+        alt_public = self._make_torrent("AltGroup", is_best=False, tracker="nyaa")
+
+        result = self._run(audit, library_rgs=["AltGroup"], sd_torrents=[best, alt_public])
+        self.assertFalse(result["upgrade_available"])
 
 
 if __name__ == "__main__":
