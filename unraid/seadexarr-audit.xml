@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>SeaDexArr-Audit</Name>
+  <Repository>ghcr.io/gregoryn22/seadexarr:main</Repository>
+  <Registry>https://github.com/gregoryn22/seadexarr/pkgs/container/seadexarr</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/gregoryn22/seadexarr/issues</Support>
+  <Project>https://github.com/gregoryn22/seadexarr</Project>
+  <Overview>SeaDexArr audit mode - scans your Sonarr library against SeaDex, applies Sonarr tags (seadex / partial-seadex / seadex-upgrade-available / seadex-too-large), and sends Discord notifications when recommendations change. Never downloads, grabs, or replaces files. Before starting: mount /config, run once with AUDIT_ARGS=--dry-run to generate config.yml, edit it with your Sonarr URL/API key/Discord webhook, then switch AUDIT_ARGS to --apply-tags.</Overview>
+  <Category>MediaApp:Other</Category>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/gregoryn22/seadexarr/main/unraid/seadexarr-audit.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/bbtufty/seadexarr/main/docs/_static/seadexarr.png</Icon>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+
+  <Config Name="Config Directory" Target="/config" Default="/mnt/user/appdata/seadexarr" Mode="rw" Description="Persistent config directory. Holds config.yml, cache.json, and audit_state.json." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/seadexarr</Config>
+
+  <Config Name="Run Mode" Target="RUN_MODE" Default="audit" Description="audit = run audit on a repeating schedule (recommended). audit-once = run once and exit. sync = original grab/sync mode." Type="Variable" Display="always" Required="true" Mask="false">audit</Config>
+
+  <Config Name="Audit Schedule (hours)" Target="AUDIT_SCHEDULE_TIME" Default="6" Description="Hours between audit runs. Only used when RUN_MODE=audit." Type="Variable" Display="always" Required="true" Mask="false">6</Config>
+
+  <Config Name="Audit Flags" Target="AUDIT_ARGS" Default="--apply-tags" Description="Flags passed to seadexarr audit. --apply-tags writes Sonarr tags (no downloads). --dry-run previews without any mutations. --notify-only sends Discord without changing tags." Type="Variable" Display="always" Required="true" Mask="false">--apply-tags</Config>
+
+  <Config Name="Sync Schedule (hours)" Target="SCHEDULE_TIME" Default="6" Description="Hours between runs when RUN_MODE=sync (original grab mode). Ignored in audit mode." Type="Variable" Display="advanced" Required="false" Mask="false">6</Config>
+
+  <Config Name="Log Level" Target="LOG_LEVEL" Default="INFO" Description="Log verbosity: DEBUG, INFO, WARNING, CRITICAL." Type="Variable" Display="advanced" Required="false" Mask="false">INFO</Config>
+
+</Container>

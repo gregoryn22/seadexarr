@@ -1,0 +1,201 @@
+# SeaDexArr — Audit Mode
+
+Audit mode scans your Sonarr library against SeaDex, applies Sonarr tags, and
+sends Discord notifications. **It never downloads, grabs, or replaces files.**
+
+---
+
+## Quick start
+
+```bash
+# Preview what would change (no Sonarr mutations, no Discord)
+seadexarr audit --dry-run
+
+# Apply Sonarr tags (still no downloads)
+seadexarr audit --apply-tags
+
+# Send Discord notifications only (no tag changes)
+seadexarr audit --notify-only
+```
+
+All three flags can be combined; `--dry-run` always wins over `--apply-tags`.
+
+---
+
+## What it does
+
+For each Sonarr series that has an AniList mapping:
+
+1. Looks up the series in SeaDex.
+2. Classifies coverage:
+   - **`none`** — no SeaDex entry.
+   - **`partial`** — SeaDex entry exists but no releases pass your filters
+     (`public_only`, `want_best`, `trackers`, `ignore_tags`).
+   - **`full`** — at least one release passes filters.
+3. Checks whether the SeaDex-recommended release differs from your current
+   library files (release-group or torrent-hash comparison — same logic as
+   the existing grab mode).
+4. Flags `upgrade_available` when there is a mismatch.
+5. Flags `too_large` when the recommended release exceeds your size limits.
+6. Applies Sonarr tags (when `--apply-tags` or `update_sonarr_tags: true`).
+7. Sends Discord notifications for new or changed findings (deduped by
+   persistent state so you are not spammed on every run).
+
+---
+
+## Config
+
+Add an `audit:` section to your `config.yml`. Running `seadexarr config init`
+copies a template with all defaults already filled in.
+
+```yaml
+audit:
+  enabled: false
+  dry_run: true           # safe default: no mutations until you set false
+  sonarr_only: true
+  notify_discord: true
+  update_sonarr_tags: true
+  remove_stale_tags: false  # only removes tags listed in audit.tags
+
+  tags:
+    full_seadex: seadex
+    partial_seadex: partial-seadex
+    upgrade_available: seadex-upgrade-available
+    too_large: seadex-too-large
+    ignored: seadex-ignored
+
+  size_filters:
+    enabled: true
+    max_absolute_gb: 80          # flag if SeaDex release > 80 GB total
+    max_size_multiplier: 2.0     # flag if > 2× your current files' size
+    notify_when_too_large: true
+    tag_when_too_large: true
+
+  discord:
+    notify_on_new_seadex_match: true
+    notify_on_new_upgrade_available: true
+    notify_on_partial_match: true
+    notify_on_too_large: true
+    notify_on_no_change: false
+    batch_notifications: true    # group up to 10 series per Discord message
+
+  state:
+    enabled: true
+    path:    # leave blank to use /config/audit_state.json
+```
+
+The `discord_url` from the top-level config is reused.
+
+---
+
+## Sonarr tags
+
+Tags are created automatically if they do not exist. Only tags listed in
+`audit.tags` are ever removed (only when `remove_stale_tags: true`). Tags
+you add manually are never touched.
+
+| Tag | Applied when |
+|-----|-------------|
+| `seadex` | Full SeaDex coverage |
+| `partial-seadex` | Entry exists but nothing passes your filters |
+| `seadex-upgrade-available` | Recommended release differs from library |
+| `seadex-too-large` | Upgrade available but exceeds size limits |
+| `seadex-ignored` | Reserved for manual use; never applied automatically |
+
+---
+
+## State file
+
+`audit_state.json` (default `/config/audit_state.json`) tracks per-series
+state between runs so Discord is not spammed. Notifications fire only when:
+
+- A series newly appears on SeaDex.
+- Coverage changes (`none → partial`, `partial → full`, etc.).
+- The recommended release group changes.
+- Your library files change and now differ from the recommendation.
+- A release newly crosses the "too large" threshold.
+
+Delete the state file to reset and re-notify everything.
+
+---
+
+## Persistent state fields
+
+```json
+{
+  "sonarr_id": 12345,
+  "tvdb_id": 67890,
+  "title": "My Favourite Show",
+  "seadex_status": "full",
+  "seadex_rgs": ["SubsPlease"],
+  "seadex_size_bytes": 5368709120,
+  "library_rgs": ["EMBER"],
+  "upgrade_available": true,
+  "too_large": false,
+  "last_notified": "2026-01-01T12:00:00+00:00",
+  "last_audited": "2026-01-01T12:00:00+00:00"
+}
+```
+
+---
+
+## Docker / Unraid
+
+Mount `/config` persistently. The state file, config, and cache all live there.
+
+```yaml
+# docker-compose.yml excerpt
+volumes:
+  - /mnt/user/appdata/seadexarr:/config
+environment:
+  - CONFIG_DIR=/config
+```
+
+Run audit on demand:
+
+```bash
+docker exec seadexarr seadexarr audit --dry-run
+docker exec seadexarr seadexarr audit --apply-tags
+```
+
+Or add a scheduled cron inside the container / via Unraid's scheduler.
+
+---
+
+## Running tests
+
+```bash
+pip install pytest
+python -m pytest tests/test_audit.py -v
+```
+
+---
+
+## Logged summary
+
+After each run, the log shows:
+
+```
+================================================================================
+Audit Summary
+================================================================================
+Scanned: 150
+Matched to SeaDex: 87
+Full coverage: 72
+Partial coverage: 15
+Upgrade available: 23
+Too large: 4
+Tags updated: 23
+Notifications sent: 6
+Errors: 0
+================================================================================
+```
+
+---
+
+## Guarantee
+
+Audit mode **never calls** `add_torrent()` or `add_torrent_to_qbit()`.
+These methods exist on the parent class but are not invoked anywhere in
+`SeaDexAudit.run()`. The qBittorrent client may be initialized (if your
+existing config has credentials) but is never used in audit mode.

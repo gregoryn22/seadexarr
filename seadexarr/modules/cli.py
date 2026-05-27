@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 import typer
 
+from .audit import SeaDexAudit
 from .seadex_arr import setup_logger
 from .seadex_radarr import SeaDexRadarr
 from .seadex_sonarr import SeaDexSonarr
@@ -15,10 +16,12 @@ seadexarr_cli = typer.Typer(name="seadexarr_cli")
 seadexarr_run = typer.Typer(name="run")
 seadexarr_config = typer.Typer(name="config")
 seadexarr_cache = typer.Typer(name="cache")
+seadexarr_audit = typer.Typer(name="audit")
 
 seadexarr_cli.add_typer(seadexarr_run)
 seadexarr_cli.add_typer(seadexarr_config)
 seadexarr_cli.add_typer(seadexarr_cache)
+seadexarr_cli.add_typer(seadexarr_audit)
 
 
 # Default command, schedule run
@@ -139,6 +142,48 @@ def run_single(
             tb = traceback.format_exc()
             for line in tb.splitlines():
                 logger.warning(line)
+
+    return True
+
+
+# Audit commands
+@seadexarr_audit.callback(invoke_without_command=True)
+def run_audit(
+    ctx: typer.Context,
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Log intended tag changes without applying them (no Sonarr mutations)",
+    ),
+    apply_tags: bool = typer.Option(
+        False,
+        "--apply-tags",
+        help="Apply SeaDex Sonarr tags; still never downloads",
+    ),
+    notify_only: bool = typer.Option(
+        False,
+        "--notify-only",
+        help="Send Discord notifications only; skip tag updates",
+    ),
+):
+    """Audit Sonarr library against SeaDex. Tags series; never grabs torrents."""
+
+    if ctx.invoked_subcommand is not None:
+        return True
+
+    config_dir = os.getenv("CONFIG_DIR", os.getcwd())
+    config = os.path.join(config_dir, "config.yml")
+    cache = os.path.join(config_dir, "cache.json")
+
+    logger = setup_logger(log_level="INFO")
+
+    try:
+        sda = SeaDexAudit(config=config, cache=cache, logger=logger)
+        sda.run(dry_run=dry_run, apply_tags=apply_tags, notify_only=notify_only)
+    except Exception:
+        tb = traceback.format_exc()
+        for line in tb.splitlines():
+            logger.warning(line)
 
     return True
 
