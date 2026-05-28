@@ -94,18 +94,37 @@ class AuditState:
         self._conn.commit()
 
     def _migrate_from_json(self, json_path: str):
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
             if not content:
+                os.rename(json_path, json_path + ".migrated")
                 return
             data = json.loads(content)
-            for entry in data.get("series", {}).values():
+        except Exception as exc:
+            _log.warning("audit_state: could not read legacy JSON %s: %s — starting fresh", json_path, exc)
+            return
+
+        migrated = failed = 0
+        for key, entry in data.get("series", {}).items():
+            try:
                 self._upsert_row(SeriesAuditState(**entry))
-            self._conn.commit()
+                migrated += 1
+            except Exception as exc:
+                failed += 1
+                _log.warning("audit_state: skipping entry %s during migration: %s", key, exc)
+
+        self._conn.commit()
+        if failed == 0:
             os.rename(json_path, json_path + ".migrated")
-        except Exception:
-            pass  # migration failure must not block startup
+            _log.info("audit_state: migrated %d entries from JSON (renamed to .migrated)", migrated)
+        else:
+            _log.warning(
+                "audit_state: migrated %d entries; %d failed — JSON preserved at %s",
+                migrated, failed, json_path,
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -182,7 +201,8 @@ class AuditState:
         if newly_large:
             return discord_cfg.get("notify_on_too_large", True)
 
-        return True
+        # State changed but no specific rule matched (e.g. partial→full when already seen)
+        return discord_cfg.get("notify_on_state_change", True)
 
     def update_series(self, state: SeriesAuditState, notified: bool = False):
         now = datetime.now(timezone.utc).isoformat()
