@@ -14,19 +14,32 @@ set -e
 AUDIT_SCHEDULE_TIME="${AUDIT_SCHEDULE_TIME:-6}"
 AUDIT_ARGS="${AUDIT_ARGS:---apply-tags}"
 
-# Clean exit on SIGTERM / SIGINT (handles the sleep period between runs)
-trap 'exit 0' TERM INT
-
 case "${RUN_MODE:-audit}" in
 
   audit)
     echo "SeaDexArr: audit mode, every ${AUDIT_SCHEDULE_TIME}h (args: ${AUDIT_ARGS})"
+    _child_pid=""
+    # Forward SIGTERM/SIGINT to the child process (Python or sleep) so that
+    # Python's graceful-shutdown handler fires during an audit run, and the
+    # inter-run sleep is interrupted immediately on stop.
+    _forward_term() {
+      if [ -n "$_child_pid" ]; then
+        kill -TERM "$_child_pid" 2>/dev/null
+        wait "$_child_pid" 2>/dev/null || true
+      fi
+      exit 0
+    }
+    trap '_forward_term' TERM INT
     while true; do
-      seadexarr audit ${AUDIT_ARGS}
+      seadexarr audit ${AUDIT_ARGS} &
+      _child_pid=$!
+      wait $_child_pid || true
+      _child_pid=""
       echo "Audit complete. Next run in ${AUDIT_SCHEDULE_TIME}h."
-      # Run sleep in background and wait so the trap fires immediately
       sleep $(( AUDIT_SCHEDULE_TIME * 3600 )) &
-      wait $!
+      _child_pid=$!
+      wait $_child_pid || true
+      _child_pid=""
     done
     ;;
 

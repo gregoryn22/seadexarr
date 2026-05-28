@@ -36,6 +36,7 @@ def _make_session() -> requests.Session:
         read=2,
         backoff_factor=1,
         allowed_methods={"POST"},
+        status_forcelist={429, 500, 502, 503, 504},
         raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retry)

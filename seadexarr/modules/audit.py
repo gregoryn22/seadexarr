@@ -60,6 +60,11 @@ class SeaDexAudit(SeaDexSonarr):
         self.audit_notify_discord: bool = audit_cfg.get("notify_discord", True)
         self.audit_update_tags: bool = audit_cfg.get("update_sonarr_tags", True)
         self.audit_remove_stale: bool = audit_cfg.get("remove_stale_tags", False)
+        if self.audit_remove_stale:
+            self.logger.warning(
+                "Config: remove_stale_tags has no effect — managed tags are always "
+                "synced and user-added non-managed tags are always preserved"
+            )
 
         tags_cfg = audit_cfg.get("tags", {}) or {}
         self.tag_full: str = tags_cfg.get("full_seadex", "seadex")
@@ -216,10 +221,17 @@ class SeaDexAudit(SeaDexSonarr):
                 changed = self._apply_series_tags(series, result, dry_run=False)
                 if changed:
                     stats["tagged"] += 1
-            elif dry_run:
+            elif dry_run and do_tags:
                 self._log_dry_run_tags(result)
 
             time.sleep(self.sleep_time)
+
+        # Persist state before notifications so a crash during Discord doesn't
+        # leave all audited series looking new on the next run.
+        if self.audit_state is not None and not dry_run:
+            for r in results:
+                if not r.error:
+                    self.audit_state.update_series(self._to_state(r), notified=False)
 
         # Notifications
         to_notify = [r for r in results if r.notify and r.seadex_status != "none"]
@@ -231,15 +243,11 @@ class SeaDexAudit(SeaDexSonarr):
                     self._send_single_discord(r, old_states.get(r.sonarr_id))
             stats["notified"] = len(to_notify)
 
-        # Persist state
+        # Update last_notified for series that Discord was actually sent for
         if self.audit_state is not None and not dry_run:
-            notified_ids = {r.sonarr_id for r in to_notify}
-            for r in results:
+            for r in to_notify:
                 if not r.error:
-                    self.audit_state.update_series(
-                        self._to_state(r),
-                        notified=r.sonarr_id in notified_ids,
-                    )
+                    self.audit_state.update_series(self._to_state(r), notified=True)
             self.audit_state.save()
 
         self._log_summary(stats)
@@ -363,8 +371,9 @@ class SeaDexAudit(SeaDexSonarr):
         seadex_dict = self.get_seadex_dict(sd_entry=sd_entry)
 
         if len(seadex_dict) == 0:
-            out["seadex_status"] = "partial"
-            return out
+            # SeaDex has an entry but all torrents were filtered by the user's
+            # tracker/public_only/want_best config — no actionable release exists.
+            return out  # seadex_status stays "none"
 
         out["seadex_status"] = "full"
         out["seadex_rgs"] = list(seadex_dict.keys())
@@ -541,8 +550,7 @@ class SeaDexAudit(SeaDexSonarr):
             al_cache=self.al_cache,
         )
 
-        discord = Discord(url=self.discord_url)
-        discord.post(embeds=[{
+        embed: dict = {
             "author": {
                 "name": "SeaDexArr Audit",
                 "url": "https://github.com/bbtufty/seadexarr",
@@ -551,8 +559,12 @@ class SeaDexAudit(SeaDexSonarr):
             "description": result.sd_url or "",
             "color": self._embed_colour(result),
             "fields": fields,
-            "thumbnail": {"url": anilist_thumb},
-        }])
+        }
+        if anilist_thumb:
+            embed["thumbnail"] = {"url": anilist_thumb}
+
+        discord = Discord(url=self.discord_url)
+        discord.post(embeds=[embed])
         time.sleep(1)
 
     def _send_batch_discord(
