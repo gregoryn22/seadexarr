@@ -242,6 +242,8 @@ class SeaDexArr:
 
         self.trackers = [t.lower() for t in trackers]
 
+        self.audit_mode = False
+
         # Advanced settings
         self.sleep_time = self.config.get("sleep_time", 2)
         self.cache_time = self.config.get("cache_time", 1)
@@ -783,6 +785,20 @@ class SeaDexArr:
 
         return seadex_release_groups
 
+    @staticmethod
+    def _fmt_size_gb(size_list):
+        """Sum a list of byte sizes and return a human-readable GB string, or '' if unknown."""
+        if not size_list:
+            return ""
+        valid = [s for s in size_list if s is not None]
+        if not valid:
+            return ""
+        return f"{sum(valid) / 1e9:.2f} GB"
+
+    def _action_word(self):
+        """Return 'tagging' in audit mode, 'downloading' otherwise."""
+        return "tagging" if self.audit_mode else "downloading"
+
     def filter_seadex_interactive(
         self,
         seadex_dict,
@@ -870,6 +886,7 @@ class SeaDexArr:
         al_id,
         release_group,
         seadex_dict,
+        arr_release_dict=None,
     ):
         """Get fields for Discord post
 
@@ -878,6 +895,7 @@ class SeaDexArr:
             al_id: AniList ID
             release_group: Arr release group
             seadex_dict: Dictionary of SeaDex releases
+            arr_release_dict: Dictionary of arr release properties (optional, for size info)
         """
 
         anilist_thumb, self.al_cache = get_anilist_thumb(
@@ -885,6 +903,8 @@ class SeaDexArr:
             al_cache=self.al_cache,
         )
         fields = []
+
+        action = "Tagging" if self.audit_mode else "Downloading"
 
         # The first field should be the Arr group. If it's empty, mention it's missing
         release_group_discord = copy.deepcopy(release_group)
@@ -897,9 +917,16 @@ class SeaDexArr:
         if isinstance(release_group_discord, str):
             release_group_discord = [release_group]
 
+        # Build current release field with size info if available
+        have_lines = []
+        for rg in release_group_discord:
+            rg_sizes = (arr_release_dict or {}).get(rg, {}).get("size", []) if arr_release_dict else []
+            size_str = self._fmt_size_gb(rg_sizes)
+            have_lines.append(f"{rg}" + (f" ({size_str})" if size_str else ""))
+
         field_dict = {
-            "name": f"{arr.capitalize()} Release:",
-            "value": "\n".join(release_group_discord),
+            "name": f"{arr.capitalize()} Release (current):",
+            "value": "\n".join(have_lines),
         }
         fields.append(field_dict)
 
@@ -914,23 +941,34 @@ class SeaDexArr:
 
             if any(dl):
 
-                # Include any tags in the string
                 discord_value = ""
+
+                # Tags
                 tags = srg_item.get("tags", [])
                 if len(tags) > 0:
-                    discord_value += "Tags:\n"
-                    discord_value += "\n".join(tags)
-                    discord_value += "\n\n"
+                    discord_value += "Tags: " + ", ".join(tags) + "\n"
+
+                # Total size across all URLs being downloaded
+                all_dl_sizes = [
+                    s
+                    for url, url_item in (srg_item.get("urls") or {}).items()
+                    if (url_item or {}).get("download", False)
+                    for s in ((url_item or {}).get("size") or [])
+                ]
+                size_str = self._fmt_size_gb(all_dl_sizes)
+                if size_str:
+                    discord_value += f"Size: {size_str}\n"
+
+                discord_value += "\n"
 
                 urls_to_download = [x for i, x in enumerate(srg_item["urls"]) if dl[i]]
 
-                # And include URLs for files we're downloading
                 discord_value += "Links:\n"
                 discord_value += "\n".join(urls_to_download)
 
                 field_dict = {
-                    "name": f"SeaDex recommendation: {srg}",
-                    "value": f"{discord_value}",
+                    "name": f"{action}: {srg}",
+                    "value": discord_value,
                 }
 
                 fields.append(field_dict)
@@ -1108,11 +1146,21 @@ class SeaDexArr:
                 # just fall back to checking against release group
                 if len(seadex_episodes) == 0:
                     if seadex_rg not in arr_release_groups and not overlapping_results:
-                        self.logger.debug(
+                        have_str = ", ".join(arr_release_groups) if arr_release_groups else "nothing"
+                        have_sizes = [
+                            s
+                            for rg in arr_release_groups
+                            for s in (arr_release_dict.get(rg, {}).get("size") or [])
+                        ]
+                        have_size_str = self._fmt_size_gb(have_sizes)
+                        sd_size_str = self._fmt_size_gb(url_item.get("size", []))
+                        sd_tags = seadex_rg_item.get("tags", [])
+                        sd_tag_str = f" ({', '.join(sd_tags)})" if sd_tags else ""
+                        have_part = f"[{have_str}]" + (f" ({have_size_str})" if have_size_str else "")
+                        sd_part = f"[{seadex_rg}]" + (f" ({sd_size_str})" if sd_size_str else "") + sd_tag_str
+                        self.logger.info(
                             left_aligned_string(
-                                f"SeaDex release group {seadex_rg} not in {arr.capitalize()} release(s): "
-                                f"{','.join([str(x) for x in arr_release_groups])}. "
-                                f"Will add {url} to downloads",
+                                f"Have: {have_part} | SeaDex: {sd_part} → {self._action_word()}",
                                 total_length=self.log_line_length,
                             )
                         )
@@ -1137,13 +1185,18 @@ class SeaDexArr:
                             )
                         )
 
+                        sd_tags = seadex_rg_item.get("tags", [])
+                        sd_tag_str = f" ({', '.join(sd_tags)})" if sd_tags else ""
+                        arr_size_str = self._fmt_size_gb(arr_file_sizes)
+                        sd_size_str = self._fmt_size_gb(seadex_file_sizes)
+
                         # If we have no overlaps at all, then add
                         if len(intersect) == 0:
+                            have_part = f"[{seadex_rg}]" + (f" ({arr_size_str})" if arr_size_str else "")
+                            sd_part = f"[{seadex_rg}]" + (f" ({sd_size_str})" if sd_size_str else "") + sd_tag_str
                             self.logger.info(
                                 left_aligned_string(
-                                    f"SeaDex release group {seadex_rg} in {arr.capitalize()} release(s): "
-                                    f"{','.join([str(x) for x in arr_release_groups])}, but filesizes do not match. "
-                                    f"Will add {url} to downloads",
+                                    f"Have: {have_part} | SeaDex: {sd_part} (size differs) → {self._action_word()}",
                                     total_length=self.log_line_length,
                                 )
                             )
@@ -1152,10 +1205,11 @@ class SeaDexArr:
                             torrent_hashes.append(url_hash)
 
                         else:
-                            self.logger.debug(
+                            have_part = f"[{seadex_rg}]" + (f" ({arr_size_str})" if arr_size_str else "")
+                            sd_part = f"[{seadex_rg}]" + (f" ({sd_size_str})" if sd_size_str else "") + sd_tag_str
+                            self.logger.info(
                                 left_aligned_string(
-                                    f"SeaDex release group {seadex_rg} in {arr.capitalize()} release(s): "
-                                    f"{','.join([str(x) for x in arr_release_groups])}, and filesizes match. ",
+                                    f"Have: {have_part} | SeaDex: {sd_part} → already have it ✓",
                                     total_length=self.log_line_length,
                                 )
                             )
@@ -1229,13 +1283,14 @@ class SeaDexArr:
                                     )
 
                                     if sonarr_rg not in all_seadex_rg:
-                                        self.logger.debug(
+                                        sd_tags = seadex_rg_item.get("tags", [])
+                                        sd_tag_str = f" ({', '.join(sd_tags)})" if sd_tags else ""
+                                        sd_ep_size_str = self._fmt_size_gb([seadex_ep_size])
+                                        have_part = f"[{sonarr_rg}] {season_ep_str}"
+                                        sd_part = f"[{seadex_rg}] {season_ep_str}" + (f" ({sd_ep_size_str})" if sd_ep_size_str else "") + sd_tag_str
+                                        self.logger.info(
                                             left_aligned_string(
-                                                f"SeaDex release group {seadex_rg} not the same as "
-                                                f"{arr.capitalize()} release for "
-                                                f"{season_ep_str} {sonarr_rg}, "
-                                                f"and does not match any other suitable releases. "
-                                                f"Will add {url} to downloads",
+                                                f"Have: {have_part} | SeaDex: {sd_part} → {self._action_word()}",
                                                 total_length=self.log_line_length,
                                             )
                                         )
@@ -1280,10 +1335,16 @@ class SeaDexArr:
                     # here and mark for download
                     size_matches = list(compress(size_matches, rg_matches))
                     if not any(size_matches) and len(size_matches) > 0:
+                        sd_tags = seadex_rg_item.get("tags", [])
+                        sd_tag_str = f" ({', '.join(sd_tags)})" if sd_tags else ""
+                        sd_size_str = self._fmt_size_gb(url_item.get("size", []))
+                        arr_sizes = arr_release_dict.get(seadex_rg, {}).get("size", [])
+                        arr_size_str = self._fmt_size_gb(arr_sizes)
+                        have_part = f"[{seadex_rg}]" + (f" ({arr_size_str})" if arr_size_str else "")
+                        sd_part = f"[{seadex_rg}]" + (f" ({sd_size_str})" if sd_size_str else "") + sd_tag_str
                         self.logger.info(
                             left_aligned_string(
-                                f"File sizes are all different for release group {seadex_rg}. "
-                                f"Will add {url} to downloads",
+                                f"Have: {have_part} | SeaDex: {sd_part} (episode sizes differ) → {self._action_word()}",
                                 total_length=self.log_line_length,
                             )
                         )
@@ -1763,6 +1824,8 @@ class SeaDexArr:
             "sonarr": "series",
         }[arr]
 
+        action = self._action_word().capitalize()
+
         self.logger.info(
             centred_string(
                 f"Mismatch found between SeaDex recommendation and existing {arr.capitalize()} {item_type}!",
@@ -1771,7 +1834,7 @@ class SeaDexArr:
         )
         self.logger.info(
             centred_string(
-                f"SeaDex recommended version(s):",
+                f"SeaDex recommended version(s) ({action}):",
                 total_length=self.log_line_length,
             )
         )
@@ -1784,20 +1847,23 @@ class SeaDexArr:
                 for x in (srg_item.get("urls") or {})
             ]
             if any(dl):
+                # Compute total size for this release group
+                all_sizes = [
+                    s
+                    for url, url_item in (srg_item.get("urls") or {}).items()
+                    if (url_item or {}).get("download", False)
+                    for s in ((url_item or {}).get("size") or [])
+                ]
+                size_str = self._fmt_size_gb(all_sizes)
+                tags = srg_item.get("tags", [])
+                tag_str = f" [{', '.join(tags)}]" if tags else ""
+                size_part = f" ({size_str})" if size_str else ""
                 self.logger.info(
                     left_aligned_string(
-                        f"{srg}:",
+                        f"{srg}{size_part}{tag_str}:",
                         total_length=self.log_line_length,
                     )
                 )
-                tags = srg_item.get("tags", [])
-                if len(tags) > 0:
-                    self.logger.info(
-                        left_aligned_string(
-                            f"   Tags: {','.join([t for t in tags])}",
-                            total_length=self.log_line_length,
-                        )
-                    )
                 for url in srg_item.get("urls", {}):
 
                     download = (

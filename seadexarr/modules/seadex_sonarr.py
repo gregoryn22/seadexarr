@@ -501,6 +501,7 @@ class SeaDexSonarr(SeaDexArr):
                             al_id=al_id,
                             release_group=sonarr_release_groups,
                             seadex_dict=seadex_dict,
+                            arr_release_dict=sonarr_release_dict,
                         )
 
                         # If we've got stuff, time to do something!

@@ -209,6 +209,7 @@ class SeaDexRadarr(SeaDexArr):
                             al_id=al_id,
                             release_group=radarr_release_group,
                             seadex_dict=seadex_dict,
+                            arr_release_dict=radarr_release_dict,
                         )
 
                         # If we've got stuff, time to do something!
