@@ -1207,7 +1207,7 @@ class SeaDexArr:
                         else:
                             have_part = f"[{seadex_rg}]" + (f" ({arr_size_str})" if arr_size_str else "")
                             sd_part = f"[{seadex_rg}]" + (f" ({sd_size_str})" if sd_size_str else "") + sd_tag_str
-                            self.logger.info(
+                            self.logger.debug(
                                 left_aligned_string(
                                     f"Have: {have_part} | SeaDex: {sd_part} → already have it ✓",
                                     total_length=self.log_line_length,
@@ -1231,6 +1231,11 @@ class SeaDexArr:
                     found_episodes = [False] * len(seadex_episodes)
                     rg_matches = [False] * len(seadex_episodes)
                     size_matches = [False] * len(seadex_episodes)
+
+                    # Collect per-episode rg-mismatch data for a single summary log line
+                    ep_rg_mismatch_have_rgs: set = set()
+                    ep_rg_mismatch_sd_sizes: list = []
+                    ep_rg_mismatch_count: int = 0
 
                     for seadex_idx, seadex_ep in enumerate(seadex_episodes):
 
@@ -1283,17 +1288,20 @@ class SeaDexArr:
                                     )
 
                                     if sonarr_rg not in all_seadex_rg:
-                                        sd_tags = seadex_rg_item.get("tags", [])
-                                        sd_tag_str = f" ({', '.join(sd_tags)})" if sd_tags else ""
-                                        sd_ep_size_str = self._fmt_size_gb([seadex_ep_size])
-                                        have_part = f"[{sonarr_rg}] {season_ep_str}"
-                                        sd_part = f"[{seadex_rg}] {season_ep_str}" + (f" ({sd_ep_size_str})" if sd_ep_size_str else "") + sd_tag_str
-                                        self.logger.info(
+                                        display_rg = sonarr_rg if sonarr_rg else "unknown"
+                                        self.logger.debug(
                                             left_aligned_string(
-                                                f"Have: {have_part} | SeaDex: {sd_part} → {self._action_word()}",
+                                                f"Have: [{display_rg}] {season_ep_str} | "
+                                                f"SeaDex: [{seadex_rg}] {season_ep_str} → {self._action_word()}",
                                                 total_length=self.log_line_length,
                                             )
                                         )
+
+                                        # Accumulate for summary
+                                        ep_rg_mismatch_have_rgs.add(display_rg)
+                                        if seadex_ep_size is not None:
+                                            ep_rg_mismatch_sd_sizes.append(seadex_ep_size)
+                                        ep_rg_mismatch_count += 1
 
                                         url_item.update({"download": True})
                                         torrent_hashes.append(url_hash)
@@ -1330,6 +1338,25 @@ class SeaDexArr:
                                     size_matches[seadex_idx] = True
 
                                 found_episodes[seadex_idx] = True
+
+                    # Emit one summary line for all per-episode rg-mismatches (collapsed from N lines)
+                    if ep_rg_mismatch_count > 0:
+                        sd_tags = seadex_rg_item.get("tags", [])
+                        sd_tag_str = f" ({', '.join(sd_tags)})" if sd_tags else ""
+                        sd_total_str = self._fmt_size_gb(ep_rg_mismatch_sd_sizes)
+                        have_rgs_str = "/".join(sorted(ep_rg_mismatch_have_rgs))
+                        sd_part = (
+                            f"[{seadex_rg}]"
+                            + (f" ({sd_total_str} total)" if sd_total_str else "")
+                            + sd_tag_str
+                        )
+                        self.logger.info(
+                            left_aligned_string(
+                                f"Have: [{have_rgs_str}] ({ep_rg_mismatch_count} eps) | "
+                                f"SeaDex: {sd_part} → {self._action_word()}",
+                                total_length=self.log_line_length,
+                            )
+                        )
 
                     # If we have matched the release groups but not the file sizes, then flag that
                     # here and mark for download
