@@ -55,6 +55,8 @@ class SeaDexAudit(SeaDexSonarr):
     def __init__(self, config: str, cache: str, logger=None):
         super().__init__(config=config, cache=cache, logger=logger)
 
+        self.audit_mode = True
+
         audit_cfg = self.config.get("audit", {}) or {}
         self.audit_dry_run: bool = audit_cfg.get("dry_run", True)
         self.audit_notify_discord: bool = audit_cfg.get("notify_discord", True)
