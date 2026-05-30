@@ -476,7 +476,7 @@ class SeaDexArr:
             sd_entry = self.seadex.from_id(al_id)
         except EntryNotFoundError:
             pass
-        except httpx.ConnectError:
+        except (httpx.ConnectError, httpx.ReadTimeout):
             self.logger.warning("Could not connect to SeaDex. Website may be down")
 
         return sd_entry
