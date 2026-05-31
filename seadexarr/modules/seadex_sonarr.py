@@ -746,11 +746,30 @@ class SeaDexSonarr(SeaDexArr):
                 f"anime[@anidbid='{anidb_id}']"
             )
 
-            # If we don't find anything, no worries. If we find multiple, worries
+            # The AniDB list can carry the same anidbid under more than one
+            # tvdbid (e.g. a title split across TVDB entries). Disambiguate by
+            # the TVDB ID we're actually working with before giving up.
             if len(anidb_item) > 1:
-                raise ValueError(
-                    "Multiple AniDB mappings found. This should not happen!"
+                tvdb_id = get_tvdb_id(mapping)
+                if tvdb_id is not None:
+                    anidb_item = [
+                        a
+                        for a in anidb_item
+                        if a.get("tvdbid") == str(tvdb_id)
+                    ]
+
+            # If we still can't resolve to a single node, skip the AniDB
+            # mapping rather than crashing the whole series — get_ep_list falls
+            # back to the offset slice below.
+            if len(anidb_item) > 1:
+                self.logger.debug(
+                    left_aligned_string(
+                        f"Multiple AniDB mappings for anidbid {anidb_id}; "
+                        f"skipping AniDB episode mapping",
+                        total_length=self.log_line_length,
+                    )
                 )
+                anidb_item = []
 
             if len(anidb_item) == 1:
                 anidb_item = anidb_item[0]
