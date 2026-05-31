@@ -593,10 +593,15 @@ class SeaDexArr:
                 "At least one of tvdb_id, tmdb_id, and imdb_id must be provided"
             )
 
+        # The Kometa Anime-IDs file keys each entry by its AniDB ID, so the
+        # AniDB ID lives in the dict key (n) and is *not* duplicated inside the
+        # value (m). get_ep_list needs it to look up AniDB episode mappings for
+        # specials/OVAs/movies, so fold the key into the mapping as "anidb_id".
+        # Use {"anidb_id": n, **m} so any pre-existing value in m wins.
         if tvdb_id is not None:
             anilist_mappings.update(
                 {
-                    m["anilist_id"]: m
+                    m["anilist_id"]: {"anidb_id": n, **m}
                     for n, m in self.anime_mappings.items()
                     if m.get("tvdb_id", None) == tvdb_id
                     and m.get("anilist_id", None) is not None
@@ -606,7 +611,7 @@ class SeaDexArr:
         if tmdb_id is not None:
             anilist_mappings.update(
                 {
-                    m["anilist_id"]: m
+                    m["anilist_id"]: {"anidb_id": n, **m}
                     for n, m in self.anime_mappings.items()
                     if m.get(f"tmdb_{tmdb_type}_id", None) == tmdb_id
                     and m.get("anilist_id", None) is not None
@@ -616,7 +621,7 @@ class SeaDexArr:
         if imdb_id is not None:
             anilist_mappings.update(
                 {
-                    m["anilist_id"]: m
+                    m["anilist_id"]: {"anidb_id": n, **m}
                     for n, m in self.anime_mappings.items()
                     if m.get("imdb_id", None) == imdb_id
                     and m.get("anilist_id", None) is not None
