@@ -4,6 +4,13 @@
 - Add "torrent_tags", which allows you to tag torrents as added to qBittorrent
 - Add "ignore tags" option, which allows you to filter out various tags
 - Use AniBridge mappings to mop up missed Sonarr/Radarr titles
+- Fix specials/OVAs/movies mis-mapping to the wrong episode: the AniDB ID from
+  the Kometa Anime-IDs key is now folded into the mapping, so the AniDB episode
+  mapping-list is actually consulted (previously dead code) instead of a naive
+  offset slice. Stops false "missing"/upgrade flags for entries like Attack on
+  Titan ~Chronicle~
+- Disambiguate duplicate AniDB mappings by TVDB ID and fail soft instead of
+  erroring out the whole series
 
 0.9.0 (2025-09-13)
 ==================
