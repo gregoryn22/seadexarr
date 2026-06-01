@@ -382,12 +382,23 @@ class SeaDexAudit(SeaDexSonarr):
         out["seadex_size_bytes"] = self._sum_seadex_size(seadex_dict)
 
         seadex_dict = self.parse_episodes_from_seadex(seadex_dict=seadex_dict)
+
+        # Does the library already hold a SeaDex-listed release (best OR alt)?
+        # When alt_is_acceptable, this both rescues the upgrade flag below and
+        # stops filter_seadex_downloads from logging a misleading "tagging" line
+        # for a series we won't actually flag.
+        acceptable_alt_owned = self.alt_is_acceptable and self._library_has_seadex_rg(
+            sd_entry=sd_entry,
+            library_rgs=out["library_rgs"],
+        )
+
         _, seadex_dict = self.filter_seadex_downloads(
             al_id=al_id,
             seadex_dict=seadex_dict,
             arr="sonarr",
             arr_release_dict=sonarr_release_dict,
             ep_list=ep_list,
+            acceptable_alt_owned=acceptable_alt_owned,
         )
         out["upgrade_available"] = self.get_any_to_download(seadex_dict=seadex_dict)
 
@@ -400,20 +411,25 @@ class SeaDexAudit(SeaDexSonarr):
 
         # If alt releases are acceptable and the library already has any
         # SeaDex-listed release (best OR alt), don't flag for upgrade.
-        if (out["upgrade_available"] or out["too_large"]) and self.alt_is_acceptable:
-            all_candidates = [
-                t for t in sd_entry.torrents
-                if not set(self.ignore_tags) & set(t.tags)
-                and t.tracker.lower() in self.trackers
-            ]
-            if self.public_only:
-                all_candidates = [t for t in all_candidates if t.tracker.is_public()]
-            all_sd_rgs = {t.release_group for t in all_candidates}
-            if set(out["library_rgs"]) & all_sd_rgs:
-                out["upgrade_available"] = False
-                out["too_large"] = False
+        if (out["upgrade_available"] or out["too_large"]) and acceptable_alt_owned:
+            out["upgrade_available"] = False
+            out["too_large"] = False
 
         return out
+
+    def _library_has_seadex_rg(self, sd_entry, library_rgs) -> bool:
+        """True if the library holds any SeaDex-listed release group (best or
+        alt), honoring the same tracker/public/ignore-tag filters as
+        get_seadex_dict so acceptability matches what we'd actually grab."""
+        candidates = [
+            t for t in sd_entry.torrents
+            if not set(self.ignore_tags) & set(t.tags)
+            and t.tracker.lower() in self.trackers
+        ]
+        if self.public_only:
+            candidates = [t for t in candidates if t.tracker.is_public()]
+        all_sd_rgs = {t.release_group for t in candidates}
+        return bool(set(library_rgs) & all_sd_rgs)
 
     # ------------------------------------------------------------------
     # Tags

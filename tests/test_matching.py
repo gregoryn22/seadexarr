@@ -65,6 +65,44 @@ _SONARR_EPISODES = [
 ]
 
 
+# AniDB fragment where one AniDB episode spans several TVDB episodes via a
+# '+'-joined group ("1-1+2+3"): the Burn the Witch case that crashed int().
+_ANIDB_XML_PLUS = """
+<anime-list>
+  <anime anidbid="16321" tvdbid="389481" defaulttvdbseason="0">
+    <name>Burn the Witch</name>
+    <mapping-list>
+      <mapping anidbseason="1" tvdbseason="0">;1-1+2+3;</mapping>
+    </mapping-list>
+  </anime>
+</anime-list>
+"""
+
+_SONARR_EPISODES_PLUS = [
+    {
+        "seasonNumber": 0,
+        "episodeNumber": 1,
+        "episodeFileId": 1,
+        "monitored": True,
+        "episodeFile": {"releaseGroup": "GroupA", "size": 1_000_000_000},
+    },
+    {
+        "seasonNumber": 0,
+        "episodeNumber": 2,
+        "episodeFileId": 2,
+        "monitored": True,
+        "episodeFile": {"releaseGroup": "GroupA", "size": 1_000_000_000},
+    },
+    {
+        "seasonNumber": 0,
+        "episodeNumber": 3,
+        "episodeFileId": 3,
+        "monitored": True,
+        "episodeFile": {"releaseGroup": "GroupA", "size": 1_000_000_000},
+    },
+]
+
+
 def _make_arr() -> SeaDexArr:
     arr = SeaDexArr.__new__(SeaDexArr)
     arr.anime_mappings = _ANIME_IDS
@@ -119,12 +157,12 @@ class TestAnimeMappingAnidbId(unittest.TestCase):
 
 class TestGetEpListSpecial(unittest.TestCase):
 
-    def _run_get_ep_list(self, mapping, anidb_mappings):
+    def _run_get_ep_list(self, mapping, anidb_mappings, episodes=None, al_id=119113):
         s = _make_sonarr(anidb_mappings)
 
         resp = MagicMock()
         resp.status_code = 200
-        resp.json.return_value = list(_SONARR_EPISODES)
+        resp.json.return_value = list(episodes or _SONARR_EPISODES)
 
         with patch(
             "seadexarr.modules.seadex_sonarr.requests.get", return_value=resp
@@ -137,7 +175,7 @@ class TestGetEpListSpecial(unittest.TestCase):
         ):
             return s.get_ep_list(
                 sonarr_series_id=63,
-                al_id=119113,
+                al_id=al_id,
                 mapping=mapping,
             )
 
@@ -174,6 +212,27 @@ class TestGetEpListSpecial(unittest.TestCase):
         self.assertEqual(len(ep_list), 1)
         self.assertEqual(ep_list[0]["episodeNumber"], 1)
         self.assertEqual(ep_list[0]["episodeFileId"], 0)
+
+
+    def test_plus_grouped_mapping_expands_to_all_tvdb_episodes(self):
+        """A '+'-joined TVDB group ("1-1+2+3") maps one AniDB ep to several
+        TVDB eps without crashing int() (Burn the Witch regression)."""
+        root = ElementTree.fromstring(_ANIDB_XML_PLUS)
+        mapping = {
+            "tvdb_id": 389481,
+            "tvdb_season": 0,
+            "tvdb_epoffset": 0,
+            "anilist_id": 116673,
+            "anidb_id": "16321",
+        }
+
+        ep_list = self._run_get_ep_list(
+            mapping, root, episodes=_SONARR_EPISODES_PLUS, al_id=116673
+        )
+
+        self.assertEqual(
+            sorted(ep["episodeNumber"] for ep in ep_list), [1, 2, 3]
+        )
 
 
 if __name__ == "__main__":
