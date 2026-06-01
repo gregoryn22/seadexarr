@@ -813,59 +813,102 @@ class SeaDexSonarr(SeaDexArr):
 
                             anidb_mapping_dict[anidb_tvdbseason] = mapping_pairs
 
-        # Prefer the AniDB mapping dict over any offsets
+        # Work out the offset-based slice independently of the AniDB mapping so
+        # we can fall back to it when the two disagree (see below).
+        offset_ep_list = self._apply_offset_slice(
+            final_ep_list=final_ep_list,
+            mapping=mapping,
+            mapping_mode=mapping_mode,
+            tvdb_season=tvdb_season,
+            al_id=al_id,
+        )
+
         if len(anidb_mapping_dict) > 0:
-            anidb_final_ep_list = []
 
-            # See if we have the mapping for each entry
-            for ep in final_ep_list:
+            # See if we have the AniDB mapping for each entry
+            anidb_ep_list = [
+                ep
+                for ep in final_ep_list
+                if anidb_mapping_dict.get(ep.get("seasonNumber", None), {}).get(
+                    ep.get("episodeNumber", None), None
+                )
+                is not None
+            ]
 
-                season_number = ep.get("seasonNumber", None)
-                episode_number = ep.get("episodeNumber", None)
+            # The AniDB anime-list and the Kometa Anime-IDs offset can resolve a
+            # special/OVA to *different* TVDB episodes — each tracks a different
+            # snapshot of TVDB's (frequently re-ordered) special numbering. When
+            # the AniDB slot is empty but the offset slot holds a file, trust the
+            # file we actually own. If the AniDB slot has a file, or neither does
+            # (genuinely missing), keep the AniDB mapping.
+            anidb_has_file = any(ep.get("episodeFileId", 0) for ep in anidb_ep_list)
+            offset_has_file = any(ep.get("episodeFileId", 0) for ep in offset_ep_list)
 
-                anidb_mapping_dict_entry = anidb_mapping_dict.get(
-                    season_number, {}
-                ).get(episode_number, None)
-                if anidb_mapping_dict_entry is not None:
-                    anidb_final_ep_list.append(ep)
-
-            final_ep_list = copy.deepcopy(anidb_final_ep_list)
+            if not anidb_has_file and offset_has_file:
+                self.logger.debug(
+                    left_aligned_string(
+                        "AniDB mapping resolved to an unowned episode but the "
+                        "offset slice matches an owned file; using the offset slice",
+                        total_length=self.log_line_length,
+                    )
+                )
+                final_ep_list = copy.deepcopy(offset_ep_list)
+            else:
+                final_ep_list = copy.deepcopy(anidb_ep_list)
 
         else:
-
-            # First case, we've got Anime IDs
-            if mapping_mode == "anime_ids":
-
-                # Slice the list to get the correct episodes, so any potential offsets
-                ep_offset = mapping.get("tvdb_epoffset", 0)
-                n_eps, self.al_cache = get_anilist_n_eps(
-                    al_id,
-                    al_cache=self.al_cache,
-                )
-
-                # If we don't get a number of episodes, use them all
-                if n_eps is None:
-                    n_eps = len(final_ep_list) - ep_offset
-
-                # Check that we're including this by the episode number. This only
-                # works for single-seasons, so be careful!
-                if tvdb_season != -1:
-                    final_ep_list = [
-                        ep
-                        for ep in final_ep_list
-                        if 1 <= ep.get("episodeNumber", None) - ep_offset <= n_eps
-                    ]
-                else:
-                    final_ep_list = final_ep_list[ep_offset : n_eps + ep_offset]
-
-            # Or, we've got AniBridge mappings so we don't need to do anything (hooray)
-            elif mapping_mode == "anibridge":
-                pass
-
-            else:
-                raise ValueError(f"Invalid mapping mode {mapping_mode}")
+            final_ep_list = offset_ep_list
 
         return final_ep_list
+
+    def _apply_offset_slice(
+        self,
+        final_ep_list,
+        mapping,
+        mapping_mode,
+        tvdb_season,
+        al_id,
+    ):
+        """Slice a season-filtered episode list down using the Anime-IDs offset
+
+        Args:
+            final_ep_list (list): Season-filtered episodes
+            mapping (dict): Mapping dictionary between TVDB and AniList
+            mapping_mode (str): Either "anime_ids" or "anibridge"
+            tvdb_season (int): TVDB season number
+            al_id (int): AniList ID
+        """
+
+        # First case, we've got Anime IDs
+        if mapping_mode == "anime_ids":
+
+            # Slice the list to get the correct episodes, so any potential offsets
+            ep_offset = mapping.get("tvdb_epoffset", 0)
+            n_eps, self.al_cache = get_anilist_n_eps(
+                al_id,
+                al_cache=self.al_cache,
+            )
+
+            # If we don't get a number of episodes, use them all
+            if n_eps is None:
+                n_eps = len(final_ep_list) - ep_offset
+
+            # Check that we're including this by the episode number. This only
+            # works for single-seasons, so be careful!
+            if tvdb_season != -1:
+                return [
+                    ep
+                    for ep in final_ep_list
+                    if 1 <= ep.get("episodeNumber", None) - ep_offset <= n_eps
+                ]
+
+            return final_ep_list[ep_offset : n_eps + ep_offset]
+
+        # Or, we've got AniBridge mappings so we don't need to do anything (hooray)
+        if mapping_mode == "anibridge":
+            return list(final_ep_list)
+
+        raise ValueError(f"Invalid mapping mode {mapping_mode}")
 
     def get_sonarr_release_dict(
         self,

@@ -118,6 +118,7 @@ def _make_sonarr(anidb_mappings) -> SeaDexSonarr:
     s.anidb_mappings = anidb_mappings
     s.al_cache = {}
     s.logger = MagicMock()
+    s.log_line_length = 80
     return s
 
 
@@ -213,6 +214,79 @@ class TestGetEpListSpecial(unittest.TestCase):
         self.assertEqual(ep_list[0]["episodeNumber"], 1)
         self.assertEqual(ep_list[0]["episodeFileId"], 0)
 
+
+    def test_offset_wins_when_anidb_slot_unowned(self):
+        """Carnival Phantasm EX Season: AniDB's stale ;1-5; maps to a file-less
+        S00E05, but the Kometa offset (tvdb_epoffset=1) correctly lands on the
+        owned S00E02. When AniDB resolves to an unowned slot and the offset slot
+        holds a file, prefer the offset slice."""
+        anidb_xml = """
+        <anime-list>
+          <anime anidbid="8824" tvdbid="251047" defaulttvdbseason="0" episodeoffset="1">
+            <mapping-list>
+              <mapping anidbseason="1" tvdbseason="0">;1-5;</mapping>
+            </mapping-list>
+          </anime>
+        </anime-list>
+        """
+        root = ElementTree.fromstring(anidb_xml)
+        mapping = {
+            "tvdb_id": 251047,
+            "tvdb_season": 0,
+            "tvdb_epoffset": 1,
+            "anilist_id": 12187,
+            "anidb_id": "8824",
+        }
+
+        # S00E02 holds the EX Season file (Komorebi); S00E05 is empty — exactly
+        # where the stale AniDB mapping points.
+        episodes = [
+            {"seasonNumber": 0, "episodeNumber": 1, "episodeFileId": 0, "monitored": True},
+            {
+                "seasonNumber": 0,
+                "episodeNumber": 2,
+                "episodeFileId": 49090,
+                "monitored": True,
+                "episodeFile": {"releaseGroup": "Komorebi", "size": 987_000_000},
+            },
+            {"seasonNumber": 0, "episodeNumber": 5, "episodeFileId": 0, "monitored": True},
+        ]
+
+        ep_list = self._run_get_ep_list(mapping, root, episodes=episodes, al_id=12187)
+
+        self.assertEqual(len(ep_list), 1)
+        self.assertEqual(ep_list[0]["episodeNumber"], 2)
+        self.assertEqual(ep_list[0]["episodeFile"]["releaseGroup"], "Komorebi")
+
+    def test_anidb_wins_when_neither_slot_owned(self):
+        """When the AniDB slot and the offset slot are both unowned (genuinely
+        missing special), keep the AniDB mapping rather than silently switching."""
+        anidb_xml = """
+        <anime-list>
+          <anime anidbid="8824" tvdbid="251047" defaulttvdbseason="0" episodeoffset="1">
+            <mapping-list>
+              <mapping anidbseason="1" tvdbseason="0">;1-5;</mapping>
+            </mapping-list>
+          </anime>
+        </anime-list>
+        """
+        root = ElementTree.fromstring(anidb_xml)
+        mapping = {
+            "tvdb_id": 251047,
+            "tvdb_season": 0,
+            "tvdb_epoffset": 1,
+            "anilist_id": 12187,
+            "anidb_id": "8824",
+        }
+        episodes = [
+            {"seasonNumber": 0, "episodeNumber": 2, "episodeFileId": 0, "monitored": True},
+            {"seasonNumber": 0, "episodeNumber": 5, "episodeFileId": 0, "monitored": True},
+        ]
+
+        ep_list = self._run_get_ep_list(mapping, root, episodes=episodes, al_id=12187)
+
+        self.assertEqual(len(ep_list), 1)
+        self.assertEqual(ep_list[0]["episodeNumber"], 5)
 
     def test_plus_grouped_mapping_expands_to_all_tvdb_episodes(self):
         """A '+'-joined TVDB group ("1-1+2+3") maps one AniDB ep to several
