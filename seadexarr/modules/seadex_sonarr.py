@@ -796,9 +796,17 @@ class SeaDexSonarr(SeaDexArr):
                             if not anidb_tvdbseason == tvdb_season:
                                 continue
 
-                            anidb_mapping_dict[anidb_tvdbseason] = {
-                                int(x[1]): int(x[0]) for x in i_split
-                            }
+                            # The TVDB side of a mapping can be a '+'-joined
+                            # group (e.g. "1-1+2+3"), meaning one AniDB episode
+                            # spans several TVDB episodes. Expand those so each
+                            # TVDB episode points back at the AniDB episode.
+                            mapping_pairs = {}
+                            for x in i_split:
+                                anidb_ep = int(x[0])
+                                for tvdb_ep in x[1].split("+"):
+                                    mapping_pairs[int(tvdb_ep)] = anidb_ep
+
+                            anidb_mapping_dict[anidb_tvdbseason] = mapping_pairs
 
         # Prefer the AniDB mapping dict over any offsets
         if len(anidb_mapping_dict) > 0:

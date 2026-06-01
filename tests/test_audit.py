@@ -613,6 +613,113 @@ class TestAltIsAcceptable(unittest.TestCase):
         result = self._run(audit, library_rgs=["AltGroup"], sd_torrents=[best, alt_public])
         self.assertFalse(result["upgrade_available"])
 
+    def _filter_kwarg(self, audit, library_rgs, sd_torrents):
+        """Run an audit and return the acceptable_alt_owned kwarg that
+        _audit_al_id passed down to filter_seadex_downloads."""
+        mock_series = MagicMock()
+        mock_series.id = 1
+        mock_series.title = "Test Show"
+
+        mock_sd_entry = MagicMock()
+        mock_sd_entry.url = "https://seadex.moe/test"
+        mock_sd_entry.torrents = sd_torrents
+
+        release_dict = {rg: {"size": [1_000_000_000]} for rg in library_rgs}
+        seadex_dict = {"BestGroup": {"urls": {}}}
+        mock_filter = MagicMock(return_value=(True, seadex_dict))
+
+        with patch.object(audit, "get_seadex_entry", return_value=mock_sd_entry), \
+             patch.object(audit, "get_anilist_title", return_value="Test Show"), \
+             patch.object(audit, "get_ep_list", return_value=[]), \
+             patch.object(audit, "get_sonarr_release_dict", return_value=release_dict), \
+             patch.object(audit, "get_seadex_dict", return_value=seadex_dict), \
+             patch.object(audit, "_sum_seadex_size", return_value=2_000_000_000), \
+             patch.object(audit, "parse_episodes_from_seadex", return_value=seadex_dict), \
+             patch.object(audit, "filter_seadex_downloads", mock_filter), \
+             patch.object(audit, "get_any_to_download", return_value=True):
+            audit._audit_al_id(mock_series, 12345, {})
+
+        return mock_filter.call_args.kwargs["acceptable_alt_owned"]
+
+    def test_filter_told_alt_owned_when_library_has_alt(self):
+        audit = self._make_audit(alt_is_acceptable=True)
+        torrents = [
+            self._make_torrent("BestGroup", is_best=True),
+            self._make_torrent("AltGroup", is_best=False),
+        ]
+        self.assertTrue(self._filter_kwarg(audit, ["AltGroup"], torrents))
+
+    def test_filter_not_told_alt_owned_when_library_lacks_seadex_rg(self):
+        audit = self._make_audit(alt_is_acceptable=True)
+        torrents = [
+            self._make_torrent("BestGroup", is_best=True),
+            self._make_torrent("AltGroup", is_best=False),
+        ]
+        self.assertFalse(self._filter_kwarg(audit, ["SomethingElse"], torrents))
+
+    def test_filter_not_told_alt_owned_when_feature_disabled(self):
+        audit = self._make_audit(alt_is_acceptable=False)
+        torrents = [
+            self._make_torrent("BestGroup", is_best=True),
+            self._make_torrent("AltGroup", is_best=False),
+        ]
+        self.assertFalse(self._filter_kwarg(audit, ["AltGroup"], torrents))
+
+
+class TestFilterByReleaseGroupAltLog(unittest.TestCase):
+    """The misleading '→ tagging' line must drop to debug when an owned alt
+    makes the entry acceptable."""
+
+    def _make_arr(self):
+        from seadexarr.modules.seadex_arr import SeaDexArr
+        arr = SeaDexArr.__new__(SeaDexArr)
+        arr.audit_mode = True
+        arr.use_torrent_hash_to_filter = False
+        arr.log_line_length = 80
+        arr.logger = MagicMock()
+        return arr
+
+    def _seadex_dict(self):
+        return {
+            "BestGroup": {
+                "tags": [],
+                "urls": {
+                    "https://example.com/best": {
+                        "hash": "h1",
+                        "size": [28_000_000_000],
+                        "episodes": [],
+                        "download": False,
+                    }
+                },
+            }
+        }
+
+    def test_owned_alt_demotes_tagging_log_to_debug(self):
+        arr = self._make_arr()
+        arr.filter_by_release_group(
+            seadex_dict=self._seadex_dict(),
+            arr="sonarr",
+            arr_release_dict={"AltGroup": {"size": [9_000_000_000]}},
+            ep_list=[],
+            acceptable_alt_owned=True,
+        )
+        info_msgs = " ".join(str(c.args[0]) for c in arr.logger.info.call_args_list)
+        debug_msgs = " ".join(str(c.args[0]) for c in arr.logger.debug.call_args_list)
+        self.assertNotIn("tagging", info_msgs)
+        self.assertIn("have acceptable alt", debug_msgs)
+
+    def test_no_alt_keeps_tagging_log_at_info(self):
+        arr = self._make_arr()
+        arr.filter_by_release_group(
+            seadex_dict=self._seadex_dict(),
+            arr="sonarr",
+            arr_release_dict={"AltGroup": {"size": [9_000_000_000]}},
+            ep_list=[],
+            acceptable_alt_owned=False,
+        )
+        info_msgs = " ".join(str(c.args[0]) for c in arr.logger.info.call_args_list)
+        self.assertIn("tagging", info_msgs)
+
 
 if __name__ == "__main__":
     unittest.main()

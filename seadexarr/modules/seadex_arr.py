@@ -987,6 +987,7 @@ class SeaDexArr:
         arr,
         arr_release_dict,
         ep_list=None,
+        acceptable_alt_owned=False,
     ):
         """Flip the switch on whether we're downloading this torrent or not
 
@@ -996,6 +997,10 @@ class SeaDexArr:
             arr: Type of arr instance
             arr_release_dict: Dictionary of arr release properties
             ep_list: List of episodes. Defaults to None
+            acceptable_alt_owned: True when the library already holds a
+                SeaDex-listed alt that makes this entry acceptable (audit mode
+                with alt_is_acceptable). Softens "tagging" logs to debug since
+                the entry won't actually be flagged. Defaults to False
         """
 
         if self.use_torrent_hash_to_filter:
@@ -1010,6 +1015,7 @@ class SeaDexArr:
                 arr=arr,
                 arr_release_dict=arr_release_dict,
                 ep_list=ep_list,
+                acceptable_alt_owned=acceptable_alt_owned,
             )
 
             # Also include any cached hashes
@@ -1094,6 +1100,7 @@ class SeaDexArr:
         arr,
         arr_release_dict,
         ep_list=None,
+        acceptable_alt_owned=False,
     ):
         """Filter torrents by release group
 
@@ -1107,7 +1114,20 @@ class SeaDexArr:
             arr: Type of arr instance
             arr_release_dict: Dictionary of arr release properties
             ep_list: List of episodes. Defaults to None
+            acceptable_alt_owned: True when the library already holds a
+                SeaDex-listed alt that makes this entry acceptable. The
+                per-release "tagging" lines are then logged at debug instead
+                of info, since the caller won't actually flag the entry.
+                Defaults to False
         """
+
+        # When an owned alt already makes this acceptable, the entry won't be
+        # tagged — so demote the per-release "tagging" lines to debug and say so
+        # rather than printing a misleading "→ tagging".
+        upgrade_log = self.logger.debug if acceptable_alt_owned else self.logger.info
+        upgrade_verb = (
+            "have acceptable alt ✓" if acceptable_alt_owned else self._action_word()
+        )
 
         # Get a simple list of the release groups
         arr_release_groups = list(arr_release_dict.keys())
@@ -1163,9 +1183,9 @@ class SeaDexArr:
                         sd_tag_str = f" ({', '.join(sd_tags)})" if sd_tags else ""
                         have_part = f"[{have_str}]" + (f" ({have_size_str})" if have_size_str else "")
                         sd_part = f"[{seadex_rg}]" + (f" ({sd_size_str})" if sd_size_str else "") + sd_tag_str
-                        self.logger.info(
+                        upgrade_log(
                             left_aligned_string(
-                                f"Have: {have_part} | SeaDex: {sd_part} → {self._action_word()}",
+                                f"Have: {have_part} | SeaDex: {sd_part} → {upgrade_verb}",
                                 total_length=self.log_line_length,
                             )
                         )
@@ -1199,9 +1219,9 @@ class SeaDexArr:
                         if len(intersect) == 0:
                             have_part = f"[{seadex_rg}]" + (f" ({arr_size_str})" if arr_size_str else "")
                             sd_part = f"[{seadex_rg}]" + (f" ({sd_size_str})" if sd_size_str else "") + sd_tag_str
-                            self.logger.info(
+                            upgrade_log(
                                 left_aligned_string(
-                                    f"Have: {have_part} | SeaDex: {sd_part} (size differs) → {self._action_word()}",
+                                    f"Have: {have_part} | SeaDex: {sd_part} (size differs) → {upgrade_verb}",
                                     total_length=self.log_line_length,
                                 )
                             )
@@ -1355,10 +1375,10 @@ class SeaDexArr:
                             + (f" ({sd_total_str} total)" if sd_total_str else "")
                             + sd_tag_str
                         )
-                        self.logger.info(
+                        upgrade_log(
                             left_aligned_string(
                                 f"Have: [{have_rgs_str}] ({ep_rg_mismatch_count} eps) | "
-                                f"SeaDex: {sd_part} → {self._action_word()}",
+                                f"SeaDex: {sd_part} → {upgrade_verb}",
                                 total_length=self.log_line_length,
                             )
                         )
@@ -1374,9 +1394,9 @@ class SeaDexArr:
                         arr_size_str = self._fmt_size_gb(arr_sizes)
                         have_part = f"[{seadex_rg}]" + (f" ({arr_size_str})" if arr_size_str else "")
                         sd_part = f"[{seadex_rg}]" + (f" ({sd_size_str})" if sd_size_str else "") + sd_tag_str
-                        self.logger.info(
+                        upgrade_log(
                             left_aligned_string(
-                                f"Have: {have_part} | SeaDex: {sd_part} (episode sizes differ) → {self._action_word()}",
+                                f"Have: {have_part} | SeaDex: {sd_part} (episode sizes differ) → {upgrade_verb}",
                                 total_length=self.log_line_length,
                             )
                         )
