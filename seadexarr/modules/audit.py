@@ -556,6 +556,27 @@ class SeaDexAudit(SeaDexSonarr):
         return _COLOUR_NONE
 
     @staticmethod
+    def _record_links(
+        al_id: Optional[int] = None,
+        tvdb_id: Optional[int] = None,
+        sd_url: Optional[str] = None,
+    ) -> str:
+        """Markdown link list for the AniList / TVDB / SeaDex records.
+
+        Embed field values and descriptions render markdown, so these turn the
+        bare IDs already on the result into clickable records — mirroring the
+        log line's ``AniList: <title> (<releases.moe url>)``.
+        """
+        links = []
+        if al_id:
+            links.append(f"[AniList](https://anilist.co/anime/{al_id})")
+        if tvdb_id:
+            links.append(f"[TVDB](https://thetvdb.com/dereferrer/series/{tvdb_id})")
+        if sd_url:
+            links.append(f"[SeaDex]({sd_url})")
+        return " • ".join(links)
+
+    @staticmethod
     def _actionable_entries(result: AuditResult) -> list[dict]:
         """Sub-entries needing action (upgrade / too large), worst first."""
         actionable = [
@@ -566,9 +587,10 @@ class SeaDexAudit(SeaDexSonarr):
         actionable.sort(key=lambda e: (not e.get("too_large"), e.get("anilist_title") or ""))
         return actionable
 
-    def _entry_field(self, entry: dict) -> dict:
+    def _entry_field(self, entry: dict, tvdb_id: Optional[int] = None) -> dict:
         """Render one actionable sub-entry as a Discord embed field: which
-        season / cour / part / movie, size delta, missing episodes, and link."""
+        season / cour / part / movie, size delta, missing episodes, and the
+        AniList / TVDB / SeaDex records it maps to."""
         sd_gb = entry.get("seadex_size_bytes", 0) / BYTES_PER_GB
         lib_gb = entry.get("library_size_bytes", 0) / BYTES_PER_GB
         delta_gb = sd_gb - lib_gb
@@ -580,8 +602,15 @@ class SeaDexAudit(SeaDexSonarr):
         if eps:
             lines.append(f"Missing: {eps}")
 
-        if entry.get("sd_url"):
-            lines.append(entry["sd_url"])
+        # Each cour / part carries its own AniList id and SeaDex page; the TVDB
+        # record is series-level so it's passed down from the caller.
+        links = self._record_links(
+            al_id=entry.get("al_id"),
+            tvdb_id=tvdb_id,
+            sd_url=entry.get("sd_url"),
+        )
+        if links:
+            lines.append(links)
 
         title = entry.get("anilist_title") or "Entry"
         return {"name": title[:256], "value": "\n".join(lines)[:1024], "inline": False}
@@ -628,7 +657,7 @@ class SeaDexAudit(SeaDexSonarr):
         # movie, naming exactly what needs upgrading and linking its SeaDex page.
         actionable = self._actionable_entries(result)
         for entry in actionable[:20]:  # stay well under Discord's 25-field cap
-            fields.append(self._entry_field(entry))
+            fields.append(self._entry_field(entry, tvdb_id=result.tvdb_id))
 
         if result.too_large:
             action = f"Flagged too large — tagged `{self.tag_too_large}`; no download performed"
@@ -638,10 +667,16 @@ class SeaDexAudit(SeaDexSonarr):
             action = "Already have recommended release"
         fields.append({"name": "Action", "value": action, "inline": False})
 
-        # Fall back to the series-level SeaDex link when nothing was actionable
-        # (e.g. a newly-full series) — per-entry fields already carry their own.
-        if not actionable and result.sd_url:
-            fields.append({"name": "SeaDex entry", "value": result.sd_url, "inline": False})
+        # Series-level records (AniList / TVDB / SeaDex). When per-entry fields
+        # already carry their own AniList/SeaDex links, keep this to the TVDB
+        # record plus the series SeaDex page; otherwise name all three.
+        records = self._record_links(
+            al_id=None if actionable else result.al_id,
+            tvdb_id=result.tvdb_id,
+            sd_url=result.sd_url,
+        )
+        if records:
+            fields.append({"name": "Records", "value": records, "inline": False})
 
         anilist_thumb, self.al_cache = get_anilist_thumb(
             al_id=result.al_id,
@@ -690,10 +725,21 @@ class SeaDexAudit(SeaDexSonarr):
                     diff_parts = [f"+{rg}" for rg in added_rgs] + [f"-{rg}" for rg in removed_rgs]
                     parts.append(f"Changes: {' '.join(diff_parts)}")
 
+                # Series-level AniList / TVDB / SeaDex records — per-entry fields
+                # below carry their own AniList/SeaDex links, so omit AniList here
+                # when there are any to avoid duplication.
+                actionable = self._actionable_entries(r)
+                records = self._record_links(
+                    al_id=None if actionable else r.al_id,
+                    tvdb_id=r.tvdb_id,
+                    sd_url=r.sd_url,
+                )
+                if records:
+                    parts.append(records)
+
                 # One field per actionable season / cour / part / movie, naming
                 # what needs upgrading with its size, missing episodes and link.
-                actionable = self._actionable_entries(r)
-                fields = [self._entry_field(e) for e in actionable[:20]]
+                fields = [self._entry_field(e, tvdb_id=r.tvdb_id) for e in actionable[:20]]
 
                 embed = {
                     "author": {"name": "SeaDexArr Audit"},
