@@ -9,6 +9,7 @@ import signal
 import threading
 import time
 from dataclasses import dataclass, field
+from itertools import groupby
 from typing import Optional
 
 from discordwebhook import Discord
@@ -47,6 +48,9 @@ class AuditResult:
     desired_tags: list[str] = field(default_factory=list)
     notify: bool = False
     error: Optional[str] = None
+    # Per-AniList-entry breakdown (one per season / cour / part / movie) so
+    # notifications can name exactly what is actionable and link its SeaDex page.
+    entries: list[dict] = field(default_factory=list)
 
 
 class SeaDexAudit(SeaDexSonarr):
@@ -319,6 +323,10 @@ class SeaDexAudit(SeaDexSonarr):
             result.too_large = any(d["too_large"] for d in per_al)
             result.desired_tags = self._compute_desired_tags(result)
 
+            # Keep every sub-entry so notifications can break down which
+            # season / cour / part / movie is actionable, with its own link.
+            result.entries = per_al
+
         except Exception as e:
             import traceback as _tb
             result.error = str(e)
@@ -346,6 +354,7 @@ class SeaDexAudit(SeaDexSonarr):
             "library_size_bytes": 0,
             "upgrade_available": False,
             "too_large": False,
+            "missing_episodes": [],
         }
 
         sd_entry = self.get_seadex_entry(al_id=al_id)
@@ -402,6 +411,11 @@ class SeaDexAudit(SeaDexSonarr):
         )
         out["upgrade_available"] = self.get_any_to_download(seadex_dict=seadex_dict)
 
+        # Which episodes drove the upgrade flag — union of episodes covered by
+        # every torrent flagged for download. Empty for movies / packs that
+        # Sonarr couldn't map to episode numbers.
+        out["missing_episodes"] = self._collect_download_episodes(seadex_dict)
+
         if out["upgrade_available"] and self.size_filter_enabled:
             sd_gb = out["seadex_size_bytes"] / BYTES_PER_GB
             lib_bytes = out["library_size_bytes"]
@@ -414,8 +428,45 @@ class SeaDexAudit(SeaDexSonarr):
         if (out["upgrade_available"] or out["too_large"]) and acceptable_alt_owned:
             out["upgrade_available"] = False
             out["too_large"] = False
+            out["missing_episodes"] = []
 
         return out
+
+    @staticmethod
+    def _collect_download_episodes(seadex_dict) -> list[tuple[int, int]]:
+        """(season, episode) pairs covered by any torrent flagged for download."""
+        eps: set[tuple[int, int]] = set()
+        for rg_item in seadex_dict.values():
+            for url_item in (rg_item.get("urls") or {}).values():
+                if not url_item.get("download"):
+                    continue
+                for ep in url_item.get("episodes", []):
+                    season = ep.get("season")
+                    episode = ep.get("episode")
+                    if season is not None and episode is not None:
+                        eps.add((season, episode))
+        return sorted(eps)
+
+    @staticmethod
+    def _format_episode_ranges(episodes: list[tuple[int, int]]) -> str:
+        """Compress (season, episode) pairs to e.g. 'S01E01-13, S02E03'."""
+        if not episodes:
+            return ""
+        parts: list[str] = []
+        for season, group in groupby(sorted(episodes), key=lambda x: x[0]):
+            ep_nums = sorted(e for _, e in group)
+            runs: list[tuple[int, int]] = []
+            start = prev = ep_nums[0]
+            for n in ep_nums[1:]:
+                if n == prev + 1:
+                    prev = n
+                else:
+                    runs.append((start, prev))
+                    start = prev = n
+            runs.append((start, prev))
+            for a, b in runs:
+                parts.append(f"S{season:02d}E{a:02d}" + (f"-{b:02d}" if b != a else ""))
+        return ", ".join(parts)
 
     def _library_has_seadex_rg(self, sd_entry, library_rgs) -> bool:
         """True if the library holds any SeaDex-listed release group (best or
@@ -504,13 +555,40 @@ class SeaDexAudit(SeaDexSonarr):
             return _COLOUR_PARTIAL
         return _COLOUR_NONE
 
+    @staticmethod
+    def _actionable_entries(result: AuditResult) -> list[dict]:
+        """Sub-entries needing action (upgrade / too large), worst first."""
+        actionable = [
+            e for e in result.entries
+            if e.get("upgrade_available") or e.get("too_large")
+        ]
+        # Too-large entries first, then by title for stable ordering.
+        actionable.sort(key=lambda e: (not e.get("too_large"), e.get("anilist_title") or ""))
+        return actionable
+
+    def _entry_field(self, entry: dict) -> dict:
+        """Render one actionable sub-entry as a Discord embed field: which
+        season / cour / part / movie, size delta, missing episodes, and link."""
+        sd_gb = entry.get("seadex_size_bytes", 0) / BYTES_PER_GB
+        lib_gb = entry.get("library_size_bytes", 0) / BYTES_PER_GB
+        delta_gb = sd_gb - lib_gb
+
+        label = "⚠ Upgrade too large" if entry.get("too_large") else "↑ Upgrade available"
+        lines = [label, f"{sd_gb:.1f} GB ({delta_gb:+.1f} GB vs current)"]
+
+        eps = self._format_episode_ranges(entry.get("missing_episodes", []))
+        if eps:
+            lines.append(f"Missing: {eps}")
+
+        if entry.get("sd_url"):
+            lines.append(entry["sd_url"])
+
+        title = entry.get("anilist_title") or "Entry"
+        return {"name": title[:256], "value": "\n".join(lines)[:1024], "inline": False}
+
     def _send_single_discord(self, result: AuditResult, old_state: Optional[SeriesAuditState]):
         if not self.discord_url:
             return
-
-        sd_gb = result.seadex_size_bytes / BYTES_PER_GB
-        lib_gb = result.library_size_bytes / BYTES_PER_GB
-        delta_gb = sd_gb - lib_gb
 
         old_s = old_state  # may be None on first ever audit
         added_rgs, removed_rgs = rg_diff(old_s, self._to_state(result))
@@ -546,11 +624,11 @@ class SeaDexAudit(SeaDexSonarr):
                 "inline": False,
             })
 
-        if result.upgrade_available:
-            size_str = f"{sd_gb:.1f} GB ({delta_gb:+.1f} GB vs current)"
-            if result.library_size_bytes > 0:
-                size_str += f" / {result.seadex_size_bytes / result.library_size_bytes:.1f}× current"
-            fields.append({"name": "Size", "value": size_str, "inline": False})
+        # Per-entry breakdown — one field per actionable season / cour / part /
+        # movie, naming exactly what needs upgrading and linking its SeaDex page.
+        actionable = self._actionable_entries(result)
+        for entry in actionable[:20]:  # stay well under Discord's 25-field cap
+            fields.append(self._entry_field(entry))
 
         if result.too_large:
             action = f"Flagged too large — tagged `{self.tag_too_large}`; no download performed"
@@ -560,7 +638,9 @@ class SeaDexAudit(SeaDexSonarr):
             action = "Already have recommended release"
         fields.append({"name": "Action", "value": action, "inline": False})
 
-        if result.sd_url:
+        # Fall back to the series-level SeaDex link when nothing was actionable
+        # (e.g. a newly-full series) — per-entry fields already carry their own.
+        if not actionable and result.sd_url:
             fields.append({"name": "SeaDex entry", "value": result.sd_url, "inline": False})
 
         anilist_thumb, self.al_cache = get_anilist_thumb(
@@ -598,10 +678,6 @@ class SeaDexAudit(SeaDexSonarr):
             batch = results[i : i + BATCH_SIZE]
             embeds = []
             for r in batch:
-                sd_gb = r.seadex_size_bytes / BYTES_PER_GB
-                lib_gb = r.library_size_bytes / BYTES_PER_GB
-                delta_gb = sd_gb - lib_gb
-
                 old_s = old_states.get(r.sonarr_id)
                 added_rgs, removed_rgs = rg_diff(old_s, self._to_state(r))
 
@@ -613,17 +689,22 @@ class SeaDexAudit(SeaDexSonarr):
                 if added_rgs or removed_rgs:
                     diff_parts = [f"+{rg}" for rg in added_rgs] + [f"-{rg}" for rg in removed_rgs]
                     parts.append(f"Changes: {' '.join(diff_parts)}")
-                if r.upgrade_available:
-                    flag = " ⚠ Too Large" if r.too_large else " ↑ Upgrade"
-                    parts.append(f"Size: {sd_gb:.1f} GB ({delta_gb:+.1f} GB){flag}")
 
-                embeds.append({
+                # One field per actionable season / cour / part / movie, naming
+                # what needs upgrading with its size, missing episodes and link.
+                actionable = self._actionable_entries(r)
+                fields = [self._entry_field(e) for e in actionable[:20]]
+
+                embed = {
                     "author": {"name": "SeaDexArr Audit"},
                     "title": r.anilist_title or r.sonarr_title,
                     "description": "\n".join(parts),
                     "color": self._embed_colour(r),
                     "url": r.sd_url or "",
-                })
+                }
+                if fields:
+                    embed["fields"] = fields
+                embeds.append(embed)
 
             discord = Discord(url=self.discord_url)
             discord.post(embeds=embeds)
