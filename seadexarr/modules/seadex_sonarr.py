@@ -1,6 +1,7 @@
 import copy
 import time
 import os
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
 
 import arrapi.exceptions
@@ -226,6 +227,10 @@ class SeaDexSonarr(SeaDexArr):
         )
 
         self.ignore_movies_in_radarr = self.config.get("ignore_movies_in_radarr", False)
+
+        # Sonarr runs locally, so episode-name parsing (one /parse call per file)
+        # can be fanned out across threads without worrying about rate limits.
+        self.parse_workers = self.config.get("sonarr_parse_workers", 8)
 
         # Also, if we have Radarr info, set up an instance there
         self.radarr = None
@@ -912,10 +917,20 @@ class SeaDexSonarr(SeaDexArr):
         This gets an overall episode list per-release group, and also episode lists per-torrent,
         if there are multiple
 
+        Sonarr's /parse endpoint takes one file at a time, so a release with many
+        files means many calls. They're independent and only depend on the
+        filename, so we collect every file up front, parse the unique names
+        concurrently (Sonarr is local — no rate limit to respect), then stitch
+        the results back into the dict in their original order.
+
         Args:
             seadex_dict (dict): Dictionary of seadex releases
         """
 
+        # Collect every (release_group, url, filename, size) we need to parse,
+        # initialising the episode lists as we go. Skipping NCED/NCOP etc. here
+        # keeps them out of the parse fan-out entirely.
+        tasks = []
         for release_group, release_group_item in seadex_dict.items():
 
             # Set up an overall "all episodes" list
@@ -929,61 +944,94 @@ class SeaDexSonarr(SeaDexArr):
 
                 for sd_file_idx, seadex_file in enumerate(url_item.get("files", [])):
 
-                    # Get basename from the file, and encode it through for the API
-                    # query
+                    # Get basename from the file
                     f = os.path.basename(seadex_file)
 
                     # Skip filenames with things like "NCED", "NCOP"
                     if any([x in f for x in TORRENT_FILENAMES_TO_SKIP]):
                         continue
 
-                    d = {"title": f, "apikey": self.sonarr_api_key}
-                    d_enc = urlencode(d)
+                    size = sizes[sd_file_idx] if sd_file_idx < len(sizes) else None
+                    tasks.append((release_group, url, f, size))
 
-                    # Parse through Sonarr
-                    parse_req_url = f"{self.sonarr_url}/api/v3/parse?" f"{d_enc}"
-                    parse_req = requests.get(parse_req_url)
-                    j = parse_req.json()
+        # Parse the unique filenames through Sonarr in parallel
+        parsed = self._parse_filenames({f for (_, _, f, _) in tasks})
 
-                    episode_info = j.get("episodes", [])
+        # Stitch the parsed episodes back in, preserving collection order
+        for release_group, url, f, size in tasks:
 
-                    if len(episode_info) == 0:
-                        self.logger.debug(
-                            left_aligned_string(
-                                f"Sonarr could not parse episode for {f}"
-                            )
-                        )
-                        continue
+            episode_info = parsed.get(f)
 
-                    # Add the season and episode numbers in
-                    for ep in episode_info:
+            if not episode_info:
+                self.logger.debug(
+                    left_aligned_string(
+                        f"Sonarr could not parse episode for {f}"
+                    )
+                )
+                continue
 
-                        season = ep.get("seasonNumber", None)
-                        episode = ep.get("episodeNumber", None)
-                        size = sizes[sd_file_idx]
+            url_item = seadex_dict[release_group]["urls"][url]
+            release_group_item = seadex_dict[release_group]
 
-                        if season is None or episode is None:
-                            raise ValueError("Season or episode has come up None")
+            # Add the season and episode numbers in
+            for ep in episode_info:
 
-                        self.logger.debug(
-                            left_aligned_string(
-                                f"{f} mapped to: S{season:02d}E{episode:02d}"
-                            )
-                        )
+                season = ep.get("seasonNumber", None)
+                episode = ep.get("episodeNumber", None)
 
-                        url_item["episodes"].append(
-                            {
-                                "season": season,
-                                "episode": episode,
-                                "size": size,
-                            }
-                        )
-                        release_group_item["all_episodes"].append(
-                            {
-                                "season": season,
-                                "episode": episode,
-                                "size": size,
-                            }
-                        )
+                if season is None or episode is None:
+                    raise ValueError("Season or episode has come up None")
+
+                self.logger.debug(
+                    left_aligned_string(
+                        f"{f} mapped to: S{season:02d}E{episode:02d}"
+                    )
+                )
+
+                url_item["episodes"].append(
+                    {
+                        "season": season,
+                        "episode": episode,
+                        "size": size,
+                    }
+                )
+                release_group_item["all_episodes"].append(
+                    {
+                        "season": season,
+                        "episode": episode,
+                        "size": size,
+                    }
+                )
 
         return seadex_dict
+
+    def _parse_filenames(self, filenames):
+        """Parse a set of filenames through Sonarr's /parse endpoint concurrently
+
+        Args:
+            filenames (set): Set of basename strings to parse
+
+        Returns:
+            dict: Maps each filename to its parsed ``episodes`` list, or None if
+                the call failed (so one bad file can't sink the whole series).
+        """
+
+        def parse_one(f):
+            d_enc = urlencode({"title": f, "apikey": self.sonarr_api_key})
+            parse_req_url = f"{self.sonarr_url}/api/v3/parse?{d_enc}"
+            try:
+                parse_req = requests.get(parse_req_url)
+                return f, parse_req.json().get("episodes", [])
+            except Exception as e:
+                self.logger.debug(
+                    left_aligned_string(f"Failed to parse {f} through Sonarr: {e}")
+                )
+                return f, None
+
+        filenames = list(filenames)
+        if not filenames:
+            return {}
+
+        workers = max(1, min(self.parse_workers, len(filenames)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            return {f: eps for f, eps in ex.map(parse_one, filenames)}

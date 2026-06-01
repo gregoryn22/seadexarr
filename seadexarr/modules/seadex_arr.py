@@ -17,6 +17,7 @@ from seadex import SeaDexEntry, EntryNotFoundError
 from .. import __version__
 from .anilist import get_anilist_title, get_anilist_thumb
 from .log import setup_logger, centred_string, left_aligned_string
+from .seadex_mirror import SeaDexMirror
 from .torrent import (
     get_nyaa_url,
     get_animetosho_url,
@@ -308,6 +309,29 @@ class SeaDexArr:
         self.log_line_sep = "="
         self.log_line_length = 80
 
+        # Set up the local SeaDex mirror. Rather than query the API once per
+        # title every run, we keep a local SQLite copy of the (small) SeaDex
+        # catalogue and refresh it incrementally. get_seadex_entry then reads
+        # from here. Set seadex_mirror: false to fall back to live API queries.
+        self.mirror = None
+        if self.config.get("seadex_mirror", True):
+            mirror_db = self.config.get("seadex_mirror_db", None)
+            if not mirror_db:
+                mirror_db = os.path.join(
+                    os.path.dirname(os.path.abspath(self.cache_file)),
+                    "seadex_mirror.db",
+                )
+            self.mirror = SeaDexMirror(
+                db_path=mirror_db,
+                seadex=self.seadex,
+                logger=self.logger,
+                log_line_length=self.log_line_length,
+            )
+            # If the sync fails with no local copy to fall back on, drop to live
+            # API queries for this run rather than serving an empty mirror.
+            if not self.mirror.sync():
+                self.mirror = None
+
     def verify_config(
         self,
         config_path,
@@ -467,9 +491,17 @@ class SeaDexArr:
     ):
         """Get SeaDex entry from AniList ID
 
+        Reads from the local mirror when available (a complete local copy, so a
+        miss means there is genuinely no SeaDex entry — no live retry needed).
+        Falls back to a live API query only when the mirror is disabled or
+        couldn't be built this run.
+
         Args:
             al_id (int): AniList ID
         """
+
+        if self.mirror is not None:
+            return self.mirror.get(al_id)
 
         sd_entry = None
         try:
