@@ -290,9 +290,6 @@ class SeaDexArr:
         # Instantiate the SeaDex API
         self.seadex = SeaDexEntry()
 
-        # Set up cache for AL API calls
-        self.al_cache = {}
-
         # Load in cache, if it exists. Else create
         self.cache_file = cache
         if os.path.exists(cache):
@@ -301,6 +298,20 @@ class SeaDexArr:
         else:
             cache = self.setup_cache()
         self.cache = cache
+
+        # AniList API responses (title / format / thumb / episode count) are
+        # effectively static, so persist them across runs in the cache file.
+        # Keys are stored as strings in JSON; convert back to int al_ids here so
+        # the in-memory cache hits the same way it did before. A warm cache means
+        # later runs make almost no AniList calls (and so skip the rate-limit
+        # sleep — see the audit loop).
+        self.al_cache = {
+            int(k): v for k, v in self.cache.get("al_api_cache", {}).items()
+        }
+
+        # Reverse indexes so get_anilist_ids is O(1) per series instead of a full
+        # linear scan of the (large) mapping files for every Sonarr/Radarr item.
+        self._build_mapping_indexes()
 
         # Check the package or config hasn't updated, else
         # edit the cache description
@@ -537,6 +548,36 @@ class SeaDexArr:
 
         return sd_time_str == cache_time
 
+    def _build_mapping_indexes(self):
+        """Build reverse lookups (id -> [(key, mapping), ...]) for both mapping
+        sources so get_anilist_ids resolves a series by a dict lookup rather than
+        scanning every mapping entry. Built once; the mapping files don't change
+        within a run.
+        """
+
+        index_fields = [
+            ("tvdb", "tvdb_id"),
+            ("tmdb_movie", "tmdb_movie_id"),
+            ("tmdb_show", "tmdb_show_id"),
+            ("imdb", "imdb_id"),
+        ]
+
+        def build(mappings, require_anilist_id):
+            idx = {key: {} for key, _ in index_fields}
+            for n, m in (mappings or {}).items():
+                if require_anilist_id and m.get("anilist_id", None) is None:
+                    continue
+                for key, field in index_fields:
+                    v = m.get(field, None)
+                    if v is not None:
+                        idx[key].setdefault(v, []).append((n, m))
+            return idx
+
+        # Anime-IDs entries are keyed by AniDB ID and must carry an anilist_id to
+        # be usable; AniBridge entries are keyed by AniList ID directly.
+        self._anime_idx = build(self.anime_mappings, require_anilist_id=True)
+        self._anibridge_idx = build(self.anibridge_mappings, require_anilist_id=False)
+
     def get_anilist_ids(
         self,
         tvdb_id=None,
@@ -625,41 +666,29 @@ class SeaDexArr:
                 "At least one of tvdb_id, tmdb_id, and imdb_id must be provided"
             )
 
+        if not hasattr(self, "_anime_idx"):
+            self._build_mapping_indexes()
+
+        # Gather candidate (anidb_id, mapping) pairs by id via the reverse index,
+        # in the same tvdb -> tmdb -> imdb precedence the old scan used.
+        candidates = []
+        if tvdb_id is not None:
+            candidates.extend(self._anime_idx["tvdb"].get(tvdb_id, []))
+        if tmdb_id is not None:
+            candidates.extend(self._anime_idx[f"tmdb_{tmdb_type}"].get(tmdb_id, []))
+        if imdb_id is not None:
+            candidates.extend(self._anime_idx["imdb"].get(imdb_id, []))
+
         # The Kometa Anime-IDs file keys each entry by its AniDB ID, so the
         # AniDB ID lives in the dict key (n) and is *not* duplicated inside the
         # value (m). get_ep_list needs it to look up AniDB episode mappings for
         # specials/OVAs/movies, so fold the key into the mapping as "anidb_id".
-        # Use {"anidb_id": n, **m} so any pre-existing value in m wins.
-        if tvdb_id is not None:
-            anilist_mappings.update(
-                {
-                    m["anilist_id"]: {"anidb_id": n, **m}
-                    for n, m in self.anime_mappings.items()
-                    if m.get("tvdb_id", None) == tvdb_id
-                    and m.get("anilist_id", None) is not None
-                    and m.get("anilist_id", None) not in anilist_mappings
-                }
-            )
-        if tmdb_id is not None:
-            anilist_mappings.update(
-                {
-                    m["anilist_id"]: {"anidb_id": n, **m}
-                    for n, m in self.anime_mappings.items()
-                    if m.get(f"tmdb_{tmdb_type}_id", None) == tmdb_id
-                    and m.get("anilist_id", None) is not None
-                    and m.get("anilist_id", None) not in anilist_mappings
-                }
-            )
-        if imdb_id is not None:
-            anilist_mappings.update(
-                {
-                    m["anilist_id"]: {"anidb_id": n, **m}
-                    for n, m in self.anime_mappings.items()
-                    if m.get("imdb_id", None) == imdb_id
-                    and m.get("anilist_id", None) is not None
-                    and m.get("anilist_id", None) not in anilist_mappings
-                }
-            )
+        # Use {"anidb_id": n, **m} so any pre-existing value in m wins. First
+        # match for a given AniList ID wins (index entries already require one).
+        for n, m in candidates:
+            al_id = m["anilist_id"]
+            if al_id not in anilist_mappings:
+                anilist_mappings[al_id] = {"anidb_id": n, **m}
 
         return anilist_mappings
 
@@ -696,33 +725,23 @@ class SeaDexArr:
                 "At least one of tvdb_id, tmdb_id, and imdb_id must be provided"
             )
 
+        if not hasattr(self, "_anibridge_idx"):
+            self._build_mapping_indexes()
+
+        # AniBridge entries are keyed by AniList ID directly, in the same
+        # tvdb -> tmdb -> imdb precedence the old scan used. First match wins.
+        candidates = []
         if tvdb_id is not None:
-            anilist_mappings.update(
-                {
-                    int(n): m
-                    for n, m in self.anibridge_mappings.items()
-                    if m.get("tvdb_id", None) == tvdb_id
-                    and int(n) not in anilist_mappings
-                }
-            )
+            candidates.extend(self._anibridge_idx["tvdb"].get(tvdb_id, []))
         if tmdb_id is not None:
-            anilist_mappings.update(
-                {
-                    int(n): m
-                    for n, m in self.anibridge_mappings.items()
-                    if m.get(f"tmdb_{tmdb_type}_id", None) == tmdb_id
-                    and int(n) not in anilist_mappings
-                }
-            )
+            candidates.extend(self._anibridge_idx[f"tmdb_{tmdb_type}"].get(tmdb_id, []))
         if imdb_id is not None:
-            anilist_mappings.update(
-                {
-                    int(n): m
-                    for n, m in self.anibridge_mappings.items()
-                    if m.get("imdb_id", None) == imdb_id
-                    and int(n) not in anilist_mappings
-                }
-            )
+            candidates.extend(self._anibridge_idx["imdb"].get(imdb_id, []))
+
+        for n, m in candidates:
+            al_id = int(n)
+            if al_id not in anilist_mappings:
+                anilist_mappings[al_id] = m
 
         return anilist_mappings
 
@@ -1631,6 +1650,27 @@ class SeaDexArr:
             self.cache["anilist_entries"][arr][str(al_id)] = {}
 
         self.cache["anilist_entries"][arr][str(al_id)].update(cache_details)
+
+        # Fold the AniList API cache into the same file so it survives the run.
+        self.cache["al_api_cache"] = {str(k): v for k, v in self.al_cache.items()}
+
+        save_json(
+            self.cache,
+            self.cache_file,
+            sort_cache=True,
+        )
+
+        return True
+
+    def persist_al_cache(self):
+        """Write the AniList API cache to the cache file.
+
+        The sync flow persists it via update_cache; the audit flow doesn't call
+        update_cache, so it calls this once at the end of a run to keep the warm
+        cache for next time.
+        """
+
+        self.cache["al_api_cache"] = {str(k): v for k, v in self.al_cache.items()}
         save_json(
             self.cache,
             self.cache_file,

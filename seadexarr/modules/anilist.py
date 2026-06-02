@@ -1,4 +1,5 @@
 import copy
+import time
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -6,6 +7,38 @@ from urllib3.util.retry import Retry
 
 API_URL = "https://graphql.anilist.co"
 _TIMEOUT = 30
+
+# Header-aware throttle. AniList allows 90 req/min normally (and has run a
+# degraded 30/min for long stretches). Every response carries
+# X-RateLimit-Remaining, so rather than sleep a fixed amount between every
+# request we only pace out as we approach the cap. When plenty of budget
+# remains we make no delay at all; the session's Retry (below) honours
+# Retry-After on a 429 as the backstop. This self-tunes to whatever limit
+# AniList is currently enforcing.
+_LOW_REMAINING_THRESHOLD = 5
+_THROTTLE_SLEEP = 2.0
+
+# Last seen X-RateLimit-Remaining (None until the first response).
+_rate_limit_remaining = None
+
+
+def _record_rate_limit(resp):
+    """Stash X-RateLimit-Remaining from a response for the next request to read."""
+    global _rate_limit_remaining
+    try:
+        _rate_limit_remaining = int(resp.headers.get("X-RateLimit-Remaining"))
+    except (TypeError, ValueError):
+        # Header absent or unparseable — leave the previous value untouched.
+        pass
+
+
+def _throttle_if_needed():
+    """Pace requests only when the last response showed we're near the cap."""
+    if (
+        _rate_limit_remaining is not None
+        and _rate_limit_remaining <= _LOW_REMAINING_THRESHOLD
+    ):
+        time.sleep(_THROTTLE_SLEEP)
 
 # AniList query
 QUERY = """
@@ -59,11 +92,16 @@ def get_query(al_id):
     """
 
     variables = {"id": al_id}
+
+    # Back off only if the previous response said we're near the cap.
+    _throttle_if_needed()
+
     resp = _SESSION.post(
         API_URL,
         json={"query": QUERY, "variables": variables},
         timeout=_TIMEOUT,
     )
+    _record_rate_limit(resp)
     resp.raise_for_status()
     return resp.json()
 

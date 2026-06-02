@@ -197,7 +197,6 @@ class SeaDexAudit(SeaDexSonarr):
 
             if result.error:
                 stats["errors"] += 1
-                time.sleep(self.sleep_time)
                 continue
 
             if result.seadex_status != "none":
@@ -230,7 +229,10 @@ class SeaDexAudit(SeaDexSonarr):
             elif dry_run and do_tags:
                 self._log_dry_run_tags(result)
 
-            time.sleep(self.sleep_time)
+            # No fixed per-series sleep: AniList — the only external API the
+            # audit hits — is throttled at the request layer based on its own
+            # rate-limit headers (see anilist.get_query). Series that hit the
+            # cache or have no SeaDex entry never call out, so they never wait.
 
         # Persist state before notifications so a crash during Discord doesn't
         # leave all audited series looking new on the next run.
@@ -260,6 +262,11 @@ class SeaDexAudit(SeaDexSonarr):
                         r, old_states.get(r.sonarr_id), on_sent=_mark_notified
                     )
             stats["notified"] = len(to_notify)
+
+        # Persist the warm AniList cache so the next run skips those calls (and
+        # their rate-limit sleeps). Notifications above may have added thumbnail
+        # lookups, so do this after them.
+        self.persist_al_cache()
 
         self._log_summary(stats)
         return True

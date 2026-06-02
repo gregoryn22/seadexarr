@@ -602,8 +602,10 @@ class SeaDexSonarr(SeaDexArr):
 
         sonarr_series = []
 
-        all_tvdb_ids = []
-        all_imdb_ids = []
+        # Sets so the per-series membership test below is O(1) rather than a
+        # linear scan of every mapping id for every series in the library.
+        all_tvdb_ids = set()
+        all_imdb_ids = set()
 
         # Search through TVDB and IMDb IDs via Anime IDs and AniBridge mappings
         for mapping in [
@@ -613,29 +615,28 @@ class SeaDexSonarr(SeaDexArr):
             if not mapping:
                 continue
 
-            all_tvdb_ids.extend(
+            all_tvdb_ids.update(
                 mapping[x].get("tvdb_id", None)
                 for x in mapping
-                if "tvdb_id" in mapping[x].keys()
+                if mapping[x].get("tvdb_id", None) is not None
             )
 
-            all_imdb_ids.extend(
+            all_imdb_ids.update(
                 mapping[x].get("imdb_id", None)
                 for x in mapping
-                if "imdb_id" in mapping[x].keys()
+                if mapping[x].get("imdb_id", None) is not None
             )
 
+        seen_ids = set()
         for s in self.sonarr.all_series():
 
-            # Check by TVDB IDs
-            tvdb_id = s.tvdbId
-            if tvdb_id in all_tvdb_ids and s not in sonarr_series:
-                sonarr_series.append(s)
+            if s.id in seen_ids:
+                continue
 
-            # Check by IMDb IDs
-            imdb_id = s.imdbId
-            if imdb_id in all_imdb_ids and s not in sonarr_series:
+            # Include if either id matches a mapping; add once.
+            if s.tvdbId in all_tvdb_ids or s.imdbId in all_imdb_ids:
                 sonarr_series.append(s)
+                seen_ids.add(s.id)
 
         sonarr_series.sort(key=lambda x: x.title)
 
