@@ -11,6 +11,14 @@
   Titan ~Chronicle~
 - Disambiguate duplicate AniDB mappings by TVDB ID and fail soft instead of
   erroring out the whole series
+- Rework audit Discord notifications: headlines now state a verdict ("covered,
+  nothing to do" / "better release available") instead of an internal status,
+  with a plain-English sentence on what changed. Each matched item (season,
+  cour, movie, special) gets its own field naming what it is and its coverage,
+  rather than collapsing the whole series to one line. Removes the misleading
+  "Coverage: Full" + non-matching release-group dump
+- Mark audit notifications as sent per-batch as each Discord post succeeds, so a
+  crash mid-notify no longer replays already-sent series on the next run
 
 0.9.0 (2025-09-13)
 ==================

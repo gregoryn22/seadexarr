@@ -14,10 +14,10 @@ from typing import Optional
 
 from discordwebhook import Discord
 
-from .anilist import get_anilist_thumb
+from .anilist import get_anilist_format, get_anilist_thumb
 from .audit_state import AuditState, SeriesAuditState, rg_diff, state_changed
 from .log import centred_string, left_aligned_string
-from .seadex_sonarr import SeaDexSonarr
+from .seadex_sonarr import SeaDexSonarr, get_tvdb_season
 from .sonarr_tags import SonarrTagManager
 
 BYTES_PER_GB = 1_073_741_824
@@ -239,22 +239,27 @@ class SeaDexAudit(SeaDexSonarr):
                 if not r.error:
                     self.audit_state.update_series(self._to_state(r), notified=False)
 
-        # Notifications
-        to_notify = [r for r in results if r.notify and r.seadex_status != "none"]
-        if to_notify and (self.audit_notify_discord or notify_only) and self.discord_url:
-            if self.discord_cfg.get("batch_notifications", True):
-                self._send_batch_discord(to_notify, old_states)
-            else:
-                for r in to_notify:
-                    self._send_single_discord(r, old_states.get(r.sonarr_id))
-            stats["notified"] = len(to_notify)
-
-        # Update last_notified for series that Discord was actually sent for
-        if self.audit_state is not None and not dry_run:
-            for r in to_notify:
+        # Notifications. Mark last_notified as each batch actually posts (not all
+        # at the end), so a crash mid-notify can't replay already-sent series on
+        # the next run.
+        def _mark_notified(sent: list[AuditResult]):
+            if self.audit_state is None or dry_run:
+                return
+            for r in sent:
                 if not r.error:
                     self.audit_state.update_series(self._to_state(r), notified=True)
             self.audit_state.save()
+
+        to_notify = [r for r in results if r.notify and r.seadex_status != "none"]
+        if to_notify and (self.audit_notify_discord or notify_only) and self.discord_url:
+            if self.discord_cfg.get("batch_notifications", True):
+                self._send_batch_discord(to_notify, old_states, on_sent=_mark_notified)
+            else:
+                for r in to_notify:
+                    self._send_single_discord(
+                        r, old_states.get(r.sonarr_id), on_sent=_mark_notified
+                    )
+            stats["notified"] = len(to_notify)
 
         self._log_summary(stats)
         return True
@@ -347,6 +352,13 @@ class SeaDexAudit(SeaDexSonarr):
             "al_id": al_id,
             "sd_url": None,
             "anilist_title": sonarr_series.title,
+            # Item identity for notifications: AniList format (TV / MOVIE /
+            # SPECIAL / OVA / ONA) plus the TVDB season number, so each match can
+            # be labelled "Season 2" / "Movie" / "Specials" instead of collapsing
+            # to the series name. tvdb_season is free (already in the mapping);
+            # al_format is filled below only when SeaDex actually tracks the item.
+            "al_format": None,
+            "tvdb_season": get_tvdb_season(mapping),
             "seadex_status": "none",
             "seadex_rgs": [],
             "seadex_size_bytes": 0,
@@ -363,6 +375,11 @@ class SeaDexAudit(SeaDexSonarr):
 
         out["sd_url"] = sd_entry.url
         out["anilist_title"] = self.get_anilist_title(al_id=al_id, sd_entry=sd_entry)
+        # get_anilist_title warmed al_cache with the full Media query, so this is
+        # a cache hit — no extra network round-trip.
+        out["al_format"], self.al_cache = get_anilist_format(
+            al_id=al_id, al_cache=self.al_cache
+        )
 
         ep_list = self.get_ep_list(
             sonarr_series_id=sonarr_series.id,
@@ -576,134 +593,255 @@ class SeaDexAudit(SeaDexSonarr):
             links.append(f"[SeaDex]({sd_url})")
         return " • ".join(links)
 
+    # AniList format -> label for non-seasonal items. TV / TV_SHORT fall through
+    # to a "Season N" label derived from the TVDB season instead.
+    _FORMAT_LABELS = {
+        "MOVIE": "Movie",
+        "SPECIAL": "Special",
+        "OVA": "OVA",
+        "ONA": "ONA",
+        "MUSIC": "Music video",
+    }
+    MAX_ITEM_FIELDS = 20  # leave headroom under Discord's 25-field embed cap
+
+    def _item_label(self, entry: dict) -> str:
+        """Name which part of the series this match is: "Movie", "Special",
+        "OVA", or "Season N" (TVDB season 0 -> "Specials"). Falls back to the
+        AniList title when neither format nor season pins it down."""
+        fmt = (entry.get("al_format") or "").upper()
+        if fmt in self._FORMAT_LABELS:
+            return self._FORMAT_LABELS[fmt]
+        season = entry.get("tvdb_season")
+        if season == 0:
+            return "Specials"
+        if isinstance(season, int) and season >= 1:
+            return f"Season {season}"
+        return entry.get("anilist_title") or "Entry"
+
     @staticmethod
-    def _actionable_entries(result: AuditResult) -> list[dict]:
-        """Sub-entries needing action (upgrade / too large), worst first."""
-        actionable = [
-            e for e in result.entries
-            if e.get("upgrade_available") or e.get("too_large")
-        ]
-        # Too-large entries first, then by title for stable ordering.
-        actionable.sort(key=lambda e: (not e.get("too_large"), e.get("anilist_title") or ""))
-        return actionable
+    def _item_rank(entry: dict) -> int:
+        """Sort priority: too-large (0) and upgrade (1) before covered (2)."""
+        if entry.get("too_large"):
+            return 0
+        if entry.get("upgrade_available"):
+            return 1
+        return 2
 
-    def _entry_field(self, entry: dict, tvdb_id: Optional[int] = None) -> dict:
-        """Render one actionable sub-entry as a Discord embed field: which
-        season / cour / part / movie, size delta, missing episodes, and the
-        AniList / TVDB / SeaDex records it maps to."""
+    def _item_lines(self, entry: dict) -> list[str]:
+        """Status + detail lines for one matched item (no field name)."""
+        lib = ", ".join(entry.get("library_rgs") or [])
         sd_gb = entry.get("seadex_size_bytes", 0) / BYTES_PER_GB
-        lib_gb = entry.get("library_size_bytes", 0) / BYTES_PER_GB
-        delta_gb = sd_gb - lib_gb
+        delta_gb = sd_gb - entry.get("library_size_bytes", 0) / BYTES_PER_GB
 
-        label = "⚠ Upgrade too large" if entry.get("too_large") else "↑ Upgrade available"
-        lines = [label, f"{sd_gb:.1f} GB ({delta_gb:+.1f} GB vs current)"]
+        if entry.get("too_large"):
+            head = f"🔴 upgrade too large — {sd_gb:.1f} GB ({delta_gb:+.1f} GB vs yours)"
+        elif entry.get("upgrade_available"):
+            detail = f"{sd_gb:.1f} GB ({delta_gb:+.1f} GB vs yours)"
+            eps = self._format_episode_ranges(entry.get("missing_episodes", []))
+            if eps:
+                detail += f", missing {eps}"
+            head = f"🟠 upgrade available — {detail}"
+        else:
+            head = f"🟢 covered — you have {lib}" if lib else "🟢 covered"
 
-        eps = self._format_episode_ranges(entry.get("missing_episodes", []))
-        if eps:
-            lines.append(f"Missing: {eps}")
-
-        # Each cour / part carries its own AniList id and SeaDex page; the TVDB
-        # record is series-level so it's passed down from the caller.
-        links = self._record_links(
-            al_id=entry.get("al_id"),
-            tvdb_id=tvdb_id,
-            sd_url=entry.get("sd_url"),
-        )
+        lines = [head]
+        # Each item maps to its own AniList entry and SeaDex page; the TVDB
+        # record is series-level and shown once in the embed description.
+        links = self._record_links(al_id=entry.get("al_id"), sd_url=entry.get("sd_url"))
         if links:
             lines.append(links)
+        return lines
 
-        title = entry.get("anilist_title") or "Entry"
-        return {"name": title[:256], "value": "\n".join(lines)[:1024], "inline": False}
+    def _item_field(self, entry: dict, name: str) -> dict:
+        return {
+            "name": name[:256],
+            "value": "\n".join(self._item_lines(entry))[:1024],
+            "inline": False,
+        }
 
-    def _send_single_discord(self, result: AuditResult, old_state: Optional[SeriesAuditState]):
-        if not self.discord_url:
-            return
-
-        old_s = old_state  # may be None on first ever audit
-        added_rgs, removed_rgs = rg_diff(old_s, self._to_state(result))
-
-        # Status transition label
-        old_status = old_s.seadex_status if old_s else "new"
-        new_status = result.seadex_status.capitalize()
-        if old_s and old_s.seadex_status != result.seadex_status:
-            status_label = f"{old_status.capitalize()} → {new_status}"
-        else:
-            status_label = new_status
-
-        fields = [
-            {"name": "Coverage", "value": status_label, "inline": True},
-            {
-                "name": "Library",
-                "value": ", ".join(result.library_rgs) or "None",
-                "inline": True,
-            },
-            {
-                "name": "SeaDex",
-                "value": ", ".join(result.seadex_rgs) or "None",
-                "inline": True,
-            },
+    def _tracked_items(self, result: AuditResult) -> list[dict]:
+        """Items SeaDex actually tracks (covered or actionable), worst first.
+        Items SeaDex doesn't list at all are excluded — they're only counted."""
+        tracked = [
+            e for e in result.entries
+            if e.get("seadex_status") in ("full", "partial")
         ]
+        tracked.sort(key=lambda e: (self._item_rank(e), self._item_label(e)))
+        return tracked
 
-        # Release-group diff field — only when something actually changed
-        if added_rgs or removed_rgs:
-            diff_parts = [f"+{rg}" for rg in added_rgs] + [f"-{rg}" for rg in removed_rgs]
+    def _labelled_items(self, items: list[dict]) -> list[tuple[dict, str]]:
+        """Pair each item with its display label, disambiguating split cours
+        that share a TVDB season by appending the AniList title."""
+        labels = [self._item_label(e) for e in items]
+        dupes = {label for label in labels if labels.count(label) > 1}
+        out = []
+        for entry, label in zip(items, labels):
+            if label in dupes and entry.get("anilist_title"):
+                label = f"{label} · {entry['anilist_title']}"
+            out.append((entry, label))
+        return out
+
+    @staticmethod
+    def _verdict(result: AuditResult) -> tuple[str, str]:
+        """Headline ``(emoji, verdict)`` — answers "do I need to act?", not the
+        internal status. Actionable states win so the headline leads with them
+        even when SeaDex coverage is otherwise "full"."""
+        if result.too_large:
+            return "🔴", "upgrade skipped (too large)"
+        if result.upgrade_available:
+            return "🟠", "better release available"
+        if result.seadex_status == "partial":
+            return "🟡", "partially tracked"
+        if result.seadex_status == "full":
+            return "🟢", "covered, nothing to do"
+        return "⚪", "no SeaDex match"
+
+    def _summary_sentence(
+        self, result: AuditResult, old_state: Optional[SeriesAuditState]
+    ) -> str:
+        """One plain-English sentence describing the event that fired this
+        notification — what SeaDex did and whether action is needed. Release
+        groups appear only with context, never as a bare side-by-side compare."""
+        was_new = old_state is None or old_state.seadex_status == "none"
+        have = (
+            f"your release ({', '.join(result.library_rgs)})"
+            if result.library_rgs
+            else "your library"
+        )
+
+        if result.too_large:
+            sd_gb = result.seadex_size_bytes / BYTES_PER_GB
+            delta_gb = sd_gb - result.library_size_bytes / BYTES_PER_GB
+            return (
+                f"SeaDex's recommended release is {sd_gb:.1f} GB "
+                f"({delta_gb:+.1f} GB vs yours) — over your size limit. "
+                f"Tagged `{self.tag_too_large}` — not downloaded."
+            )
+
+        if result.upgrade_available:
+            lead = "SeaDex now tracks this and recommends" if was_new else "SeaDex recommends"
+            return (
+                f"{lead} a release you don't have yet. "
+                f"Tagged `{self.tag_upgrade}` — not downloaded (audit mode)."
+            )
+
+        if result.seadex_status == "partial":
+            return "SeaDex covers some entries for this title but not all."
+
+        if result.seadex_status != "full":
+            return "SeaDex has no tracked release for this title."
+
+        # full coverage, no action needed — distinguish a brand-new match from a
+        # later change to SeaDex's release list.
+        if was_new:
+            return f"SeaDex now tracks this title and {have} is on its list."
+
+        added, removed = rg_diff(old_state, self._to_state(result))
+        if added or removed:
+            changes = []
+            if added:
+                changes.append(f"added {', '.join(added)}")
+            if removed:
+                changes.append(f"removed {', '.join(removed)}")
+            return (
+                f"SeaDex updated its release list ({'; '.join(changes)}), but {have} "
+                f"still satisfies it — no action needed."
+            )
+        return f"SeaDex still tracks this title and {have} is on its list."
+
+    def _build_embed(
+        self, result: AuditResult, old_state: Optional[SeriesAuditState]
+    ) -> dict:
+        """Build one Discord embed shared by the single- and batch-send paths so
+        both render identically: a verdict headline, one explanatory sentence,
+        and one field per SeaDex-tracked item (season / cour / movie / special)
+        — covered ones included — so the reader sees exactly what matched."""
+        tracked = self._tracked_items(result)
+        n_action = sum(1 for e in tracked if self._item_rank(e) < 2)
+
+        emoji, verdict = self._verdict(result)
+        title = result.anilist_title or result.sonarr_title
+        # With several matched items, the headline counts how many need action;
+        # a single item keeps the plain verdict.
+        if len(tracked) > 1 and n_action:
+            verdict = f"{n_action} of {len(tracked)} items need action"
+        headline = f"{emoji} {title}"
+        if verdict:
+            headline = f"{headline} — {verdict}"
+
+        desc_parts = [self._summary_sentence(result, old_state)]
+
+        # One field per tracked item, worst first, capped under Discord's field
+        # limit. Overflow is lowest-priority (already covered) so it collapses
+        # to a count rather than being dropped silently.
+        labelled = self._labelled_items(tracked)
+        shown = labelled[: self.MAX_ITEM_FIELDS]
+        fields = [self._item_field(entry, name) for entry, name in shown]
+        overflow = len(labelled) - len(shown)
+        if overflow:
             fields.append({
-                "name": "Changes",
-                "value": "  ".join(diff_parts),
+                "name": f"+{overflow} more covered",
+                "value": "Already hold a SeaDex-listed release.",
                 "inline": False,
             })
 
-        # Per-entry breakdown — one field per actionable season / cour / part /
-        # movie, naming exactly what needs upgrading and linking its SeaDex page.
-        actionable = self._actionable_entries(result)
-        for entry in actionable[:20]:  # stay well under Discord's 25-field cap
-            fields.append(self._entry_field(entry, tvdb_id=result.tvdb_id))
-
-        if result.too_large:
-            action = f"Flagged too large — tagged `{self.tag_too_large}`; no download performed"
-        elif result.upgrade_available:
-            action = f"Tagged `{self.tag_upgrade}`; no download performed"
-        else:
-            action = "Already have recommended release"
-        fields.append({"name": "Action", "value": action, "inline": False})
-
-        # Series-level records (AniList / TVDB / SeaDex). When per-entry fields
-        # already carry their own AniList/SeaDex links, keep this to the TVDB
-        # record plus the series SeaDex page; otherwise name all three.
-        records = self._record_links(
-            al_id=None if actionable else result.al_id,
-            tvdb_id=result.tvdb_id,
-            sd_url=result.sd_url,
+        # Items SeaDex doesn't track at all are noted, not listed individually.
+        untracked = sum(
+            1 for e in result.entries if e.get("seadex_status") == "none"
         )
-        if records:
-            fields.append({"name": "Records", "value": records, "inline": False})
+        if untracked:
+            desc_parts.append(f"_{untracked} other item(s) not tracked by SeaDex._")
 
-        anilist_thumb, self.al_cache = get_anilist_thumb(
-            al_id=result.al_id,
-            al_cache=self.al_cache,
-        )
+        # Series-level TVDB record — per-item fields carry their own AniList and
+        # SeaDex links, so only the series-wide record belongs here.
+        tvdb_record = self._record_links(tvdb_id=result.tvdb_id)
+        if tvdb_record:
+            desc_parts.append(tvdb_record)
 
         embed: dict = {
             "author": {
                 "name": "SeaDexArr Audit",
                 "url": "https://github.com/bbtufty/seadexarr",
             },
-            "title": result.anilist_title or result.sonarr_title,
-            "description": result.sd_url or "",
+            "title": headline[:256],
+            "description": "\n\n".join(desc_parts),
             "color": self._embed_colour(result),
-            "fields": fields,
         }
+        if result.sd_url:
+            embed["url"] = result.sd_url
+        if fields:
+            embed["fields"] = fields
+
+        anilist_thumb, self.al_cache = get_anilist_thumb(
+            al_id=result.al_id,
+            al_cache=self.al_cache,
+        )
         if anilist_thumb:
             embed["thumbnail"] = {"url": anilist_thumb}
 
+        return embed
+
+    def _send_single_discord(
+        self,
+        result: AuditResult,
+        old_state: Optional[SeriesAuditState],
+        on_sent=None,
+    ):
+        if not self.discord_url:
+            return
         discord = Discord(url=self.discord_url)
-        discord.post(embeds=[embed])
+        discord.post(embeds=[self._build_embed(result, old_state)])
+        # Confirm the post before stamping notified — a raise above skips this so
+        # the series stays un-notified and is retried next run.
+        if on_sent is not None:
+            on_sent([result])
         time.sleep(1)
 
     def _send_batch_discord(
         self,
         results: list[AuditResult],
         old_states: dict[int, Optional[SeriesAuditState]],
+        on_sent=None,
     ):
         if not self.discord_url or not results:
             return
@@ -711,49 +849,15 @@ class SeaDexAudit(SeaDexSonarr):
         BATCH_SIZE = 10  # Discord API maximum embeds per message
         for i in range(0, len(results), BATCH_SIZE):
             batch = results[i : i + BATCH_SIZE]
-            embeds = []
-            for r in batch:
-                old_s = old_states.get(r.sonarr_id)
-                added_rgs, removed_rgs = rg_diff(old_s, self._to_state(r))
-
-                parts = [f"Coverage: {r.seadex_status.capitalize()}"]
-                if r.library_rgs:
-                    parts.append(f"Library: {', '.join(r.library_rgs)}")
-                if r.seadex_rgs:
-                    parts.append(f"SeaDex: {', '.join(r.seadex_rgs)}")
-                if added_rgs or removed_rgs:
-                    diff_parts = [f"+{rg}" for rg in added_rgs] + [f"-{rg}" for rg in removed_rgs]
-                    parts.append(f"Changes: {' '.join(diff_parts)}")
-
-                # Series-level AniList / TVDB / SeaDex records — per-entry fields
-                # below carry their own AniList/SeaDex links, so omit AniList here
-                # when there are any to avoid duplication.
-                actionable = self._actionable_entries(r)
-                records = self._record_links(
-                    al_id=None if actionable else r.al_id,
-                    tvdb_id=r.tvdb_id,
-                    sd_url=r.sd_url,
-                )
-                if records:
-                    parts.append(records)
-
-                # One field per actionable season / cour / part / movie, naming
-                # what needs upgrading with its size, missing episodes and link.
-                fields = [self._entry_field(e, tvdb_id=r.tvdb_id) for e in actionable[:20]]
-
-                embed = {
-                    "author": {"name": "SeaDexArr Audit"},
-                    "title": r.anilist_title or r.sonarr_title,
-                    "description": "\n".join(parts),
-                    "color": self._embed_colour(r),
-                    "url": r.sd_url or "",
-                }
-                if fields:
-                    embed["fields"] = fields
-                embeds.append(embed)
-
+            embeds = [
+                self._build_embed(r, old_states.get(r.sonarr_id)) for r in batch
+            ]
             discord = Discord(url=self.discord_url)
             discord.post(embeds=embeds)
+            # Stamp this batch as notified only after its post succeeds, so a
+            # crash on a later batch never replays the batches already sent.
+            if on_sent is not None:
+                on_sent(batch)
             time.sleep(1)
 
     # ------------------------------------------------------------------
