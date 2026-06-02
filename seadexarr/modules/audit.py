@@ -134,6 +134,9 @@ class SeaDexAudit(SeaDexSonarr):
             effective_dry_run = self.audit_dry_run
         dry_run = effective_dry_run
 
+        # Wall-clock start so the summary can report how long the run took.
+        run_start = time.monotonic()
+
         # Graceful shutdown: SIGTERM/SIGINT finishes the current al_id then exits.
         # Stored on self so _audit_series can check between al_id iterations.
         self._shutdown = threading.Event()
@@ -268,7 +271,7 @@ class SeaDexAudit(SeaDexSonarr):
         # lookups, so do this after them.
         self.persist_al_cache()
 
-        self._log_summary(stats)
+        self._log_summary(stats, elapsed_s=time.monotonic() - run_start)
         return True
 
     # ------------------------------------------------------------------
@@ -905,7 +908,7 @@ class SeaDexAudit(SeaDexSonarr):
             )
         )
 
-    def _log_summary(self, stats: dict[str, int]):
+    def _log_summary(self, stats: dict[str, int], elapsed_s: float = 0.0):
         sep = "=" * self.log_line_length
         self.logger.info(centred_string(sep, total_length=self.log_line_length))
         self.logger.info(centred_string("Audit Summary", total_length=self.log_line_length))
@@ -927,4 +930,12 @@ class SeaDexAudit(SeaDexSonarr):
                     total_length=self.log_line_length,
                 )
             )
+        mins, secs = divmod(int(elapsed_s), 60)
+        elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+        self.logger.info(
+            centred_string(
+                f"Duration: {elapsed_str}",
+                total_length=self.log_line_length,
+            )
+        )
         self.logger.info(centred_string(sep, total_length=self.log_line_length))
