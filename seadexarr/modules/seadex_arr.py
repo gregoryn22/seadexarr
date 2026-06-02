@@ -569,8 +569,14 @@ class SeaDexArr:
                     continue
                 for key, field in index_fields:
                     v = m.get(field, None)
-                    if v is not None:
-                        idx[key].setdefault(v, []).append((n, m))
+                    # Some entries carry list-valued ids. The old scan compared
+                    # with `m.get(field) == scalar_id`, which is always False for
+                    # a list — so those never matched. Skip them here too (and
+                    # lists can't be dict keys anyway) to keep identical
+                    # behaviour rather than crash.
+                    if v is None or isinstance(v, (list, dict, set)):
+                        continue
+                    idx[key].setdefault(v, []).append((n, m))
             return idx
 
         # Anime-IDs entries are keyed by AniDB ID and must carry an anilist_id to

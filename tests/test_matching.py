@@ -152,6 +152,31 @@ class TestAnimeMappingAnidbId(unittest.TestCase):
         self.assertEqual(mappings[119113]["anidb_id"], "15582")
 
 
+class TestMappingIndexListValuedIds(unittest.TestCase):
+    """Some AniBridge entries carry list-valued ids. Those can't be dict/set
+    keys and a scalar series id never equalled a list under the old scan, so the
+    index build must skip them instead of crashing on `unhashable type: list`."""
+
+    def test_build_indexes_skips_list_valued_ids(self):
+        arr = _make_arr()
+        arr.anibridge_mappings = {
+            "111": {"tvdb_id": [1, 2, 3], "imdb_id": "tt0001"},
+            "222": {"tvdb_id": 555, "imdb_id": ["tt1", "tt2"]},
+        }
+
+        # Must not raise.
+        arr._build_mapping_indexes()
+
+        # The scalar ids are indexed and resolvable...
+        self.assertIn(555, arr._anibridge_idx["tvdb"])
+        self.assertEqual(arr.get_anilist_ids(tvdb_id=555), {222: arr.anibridge_mappings["222"]})
+        self.assertEqual(arr.get_anilist_ids(imdb_id="tt0001"), {111: arr.anibridge_mappings["111"]})
+
+        # ...while the list-valued ids are skipped, matching the old behaviour.
+        self.assertEqual(arr.get_anilist_ids(tvdb_id=1), {})
+        self.assertEqual(arr.get_anilist_ids(imdb_id="tt1"), {})
+
+
 # ---------------------------------------------------------------------------
 # get_ep_list special-episode selection
 # ---------------------------------------------------------------------------

@@ -615,16 +615,21 @@ class SeaDexSonarr(SeaDexArr):
             if not mapping:
                 continue
 
+            # Some entries carry list-valued ids; a scalar series id never equals
+            # a list, so they were unmatchable before and lists can't go in a set
+            # anyway. Keep only hashable scalar ids.
             all_tvdb_ids.update(
-                mapping[x].get("tvdb_id", None)
+                v
                 for x in mapping
-                if mapping[x].get("tvdb_id", None) is not None
+                if (v := mapping[x].get("tvdb_id", None)) is not None
+                and not isinstance(v, (list, dict, set))
             )
 
             all_imdb_ids.update(
-                mapping[x].get("imdb_id", None)
+                v
                 for x in mapping
-                if mapping[x].get("imdb_id", None) is not None
+                if (v := mapping[x].get("imdb_id", None)) is not None
+                and not isinstance(v, (list, dict, set))
             )
 
         seen_ids = set()
