@@ -506,6 +506,271 @@ class TestEmbedColour(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Notification rendering (verdict headline + plain-English summary)
+# ---------------------------------------------------------------------------
+
+class TestNotificationRendering(unittest.TestCase):
+
+    def _audit(self):
+        audit = SeaDexAudit.__new__(SeaDexAudit)
+        audit.tag_full = "seadex"
+        audit.tag_partial = "partial-seadex"
+        audit.tag_upgrade = "seadex-upgrade-available"
+        audit.tag_too_large = "seadex-too-large"
+        audit.tag_when_too_large = True
+        audit.al_cache = {}
+        return audit
+
+    # -- _verdict: headline answers "do I act?", actionable states win --------
+
+    def test_verdict_full_no_action(self):
+        emoji, verdict = SeaDexAudit._verdict(
+            _make_result(seadex_status="full", upgrade_available=False)
+        )
+        self.assertEqual(emoji, "🟢")
+        self.assertIn("nothing to do", verdict)
+
+    def test_verdict_upgrade_leads_over_full(self):
+        # full coverage but an upgrade exists -> headline must lead with action
+        emoji, verdict = SeaDexAudit._verdict(
+            _make_result(seadex_status="full", upgrade_available=True)
+        )
+        self.assertEqual(emoji, "🟠")
+        self.assertIn("better release", verdict)
+
+    def test_verdict_too_large_leads(self):
+        emoji, verdict = SeaDexAudit._verdict(
+            _make_result(seadex_status="full", upgrade_available=True, too_large=True)
+        )
+        self.assertEqual(emoji, "🔴")
+        self.assertIn("too large", verdict)
+
+    def test_verdict_none(self):
+        emoji, verdict = SeaDexAudit._verdict(_make_result(seadex_status="none"))
+        self.assertEqual(emoji, "⚪")
+
+    # -- _summary_sentence: plain English, group names only with context ------
+
+    def test_sentence_new_full_match(self):
+        audit = self._audit()
+        r = _make_result(
+            seadex_status="full", seadex_rgs=["uba"], library_rgs=["Netaro"]
+        )
+        sentence = audit._summary_sentence(r, old_state=None)
+        self.assertIn("now tracks", sentence)
+        self.assertIn("Netaro", sentence)
+
+    def test_sentence_list_changed_still_covered(self):
+        # The exact screenshot case: full coverage, SeaDex added a group (+uba),
+        # library group (Netaro) differs but still satisfies -> no false alarm.
+        audit = self._audit()
+        old = _make_state(seadex_status="full", seadex_rgs=[], library_rgs=["Netaro"])
+        r = _make_result(
+            seadex_status="full", seadex_rgs=["uba"], library_rgs=["Netaro"]
+        )
+        sentence = audit._summary_sentence(r, old_state=old)
+        self.assertIn("added uba", sentence)
+        self.assertIn("no action needed", sentence)
+        # never echo the misleading bare side-by-side compare
+        self.assertNotIn("Coverage:", sentence)
+
+    def test_sentence_upgrade_available(self):
+        audit = self._audit()
+        r = _make_result(seadex_status="full", upgrade_available=True)
+        sentence = audit._summary_sentence(r, old_state=None)
+        self.assertIn("recommends a release you don't have", sentence)
+        self.assertIn(audit.tag_upgrade, sentence)
+
+    def test_sentence_too_large(self):
+        audit = self._audit()
+        r = _make_result(
+            seadex_status="full",
+            upgrade_available=True,
+            too_large=True,
+            seadex_size_bytes=64 * 1024**3,
+            library_size_bytes=24 * 1024**3,
+        )
+        sentence = audit._summary_sentence(r, old_state=None)
+        self.assertIn("64.0 GB", sentence)
+        self.assertIn(audit.tag_too_large, sentence)
+
+    def test_sentence_partial(self):
+        audit = self._audit()
+        r = _make_result(seadex_status="partial")
+        sentence = audit._summary_sentence(r, old_state=None)
+        self.assertIn("some entries", sentence)
+
+    # -- _item_label: name the matched part (season / movie / special) --------
+
+    def test_item_label_movie(self):
+        audit = self._audit()
+        self.assertEqual(audit._item_label({"al_format": "MOVIE"}), "Movie")
+
+    def test_item_label_special_and_ova(self):
+        audit = self._audit()
+        self.assertEqual(audit._item_label({"al_format": "SPECIAL"}), "Special")
+        self.assertEqual(audit._item_label({"al_format": "OVA"}), "OVA")
+
+    def test_item_label_season_from_tvdb(self):
+        audit = self._audit()
+        self.assertEqual(
+            audit._item_label({"al_format": "TV", "tvdb_season": 2}), "Season 2"
+        )
+
+    def test_item_label_tvdb_season_zero_is_specials(self):
+        audit = self._audit()
+        self.assertEqual(
+            audit._item_label({"al_format": "TV", "tvdb_season": 0}), "Specials"
+        )
+
+    def test_item_label_falls_back_to_title(self):
+        audit = self._audit()
+        self.assertEqual(
+            audit._item_label({"tvdb_season": -1, "anilist_title": "Some OVA"}),
+            "Some OVA",
+        )
+
+    # -- _build_embed: one field per matched item, covered ones included ------
+
+    def _entry(self, **kw):
+        base = dict(
+            al_id=1, sd_url="https://seadex.moe/x", anilist_title="Item",
+            al_format="TV", tvdb_season=1, seadex_status="full",
+            seadex_rgs=["uba"], seadex_size_bytes=0, library_rgs=["Netaro"],
+            library_size_bytes=0, upgrade_available=False, too_large=False,
+            missing_episodes=[],
+        )
+        base.update(kw)
+        return base
+
+    @patch("seadexarr.modules.audit.get_anilist_thumb", return_value=(None, {}))
+    def test_build_embed_lists_each_item_with_type(self, _thumb):
+        audit = self._audit()
+        r = _make_result(
+            anilist_title="Blend S",
+            seadex_status="full",
+            upgrade_available=True,
+            entries=[
+                self._entry(al_id=1, al_format="TV", tvdb_season=1, library_rgs=["Netaro"]),
+                self._entry(
+                    al_id=2, al_format="MOVIE", tvdb_season=1, upgrade_available=True,
+                    seadex_size_bytes=12 * 1024**3, library_size_bytes=9 * 1024**3,
+                    missing_episodes=[(1, 1)],
+                ),
+            ],
+        )
+        embed = audit._build_embed(r, old_state=None)
+        # headline counts actionable items across the series
+        self.assertIn("1 of 2 items need action", embed["title"])
+        names = [f["name"] for f in embed["fields"]]
+        self.assertIn("Season 1", names)
+        self.assertIn("Movie", names)
+        # actionable item sorts first
+        self.assertEqual(embed["fields"][0]["name"], "Movie")
+        self.assertIn("missing", embed["fields"][0]["value"])
+        # covered item is still listed, not collapsed away
+        season = next(f for f in embed["fields"] if f["name"] == "Season 1")
+        self.assertIn("covered", season["value"])
+
+    @patch("seadexarr.modules.audit.get_anilist_thumb", return_value=(None, {}))
+    def test_build_embed_untracked_items_collapse_to_count(self, _thumb):
+        audit = self._audit()
+        r = _make_result(
+            anilist_title="Blend S",
+            seadex_status="full",
+            entries=[
+                self._entry(al_id=1, tvdb_season=1),
+                self._entry(al_id=2, seadex_status="none", tvdb_season=0),
+                self._entry(al_id=3, seadex_status="none", tvdb_season=2),
+            ],
+        )
+        embed = audit._build_embed(r, old_state=None)
+        # only the tracked item gets a field
+        self.assertEqual(len(embed["fields"]), 1)
+        self.assertIn("2 other item(s) not tracked", embed["description"])
+
+    @patch("seadexarr.modules.audit.get_anilist_thumb", return_value=(None, {}))
+    def test_build_embed_overflow_summarised(self, _thumb):
+        audit = self._audit()
+        entries = [self._entry(al_id=i, tvdb_season=i) for i in range(1, 26)]
+        r = _make_result(anilist_title="Long Show", seadex_status="full", entries=entries)
+        embed = audit._build_embed(r, old_state=None)
+        # capped at MAX_ITEM_FIELDS items + one overflow summary field
+        self.assertEqual(len(embed["fields"]), audit.MAX_ITEM_FIELDS + 1)
+        self.assertIn("more covered", embed["fields"][-1]["name"])
+
+    @patch("seadexarr.modules.audit.get_anilist_thumb", return_value=(None, {}))
+    def test_build_embed_no_legacy_field_dump(self, _thumb):
+        audit = self._audit()
+        old = _make_state(seadex_status="full", seadex_rgs=[], library_rgs=["Netaro"])
+        r = _make_result(
+            anilist_title="BLEND-S", seadex_status="full",
+            seadex_rgs=["uba"], library_rgs=["Netaro"],
+            entries=[self._entry(library_rgs=["Netaro"])],
+        )
+        embed = audit._build_embed(r, old_state=old)
+        for junk in ("Coverage:", "Library:", "SeaDex:", "Changes:"):
+            self.assertNotIn(junk, embed["description"])
+
+
+# ---------------------------------------------------------------------------
+# Incremental notify marking (per-batch, crash-safe)
+# ---------------------------------------------------------------------------
+
+class TestIncrementalNotify(unittest.TestCase):
+
+    def _audit(self):
+        audit = SeaDexAudit.__new__(SeaDexAudit)
+        audit.discord_url = "https://discord.test/webhook"
+        audit.tag_full = "seadex"
+        audit.tag_upgrade = "seadex-upgrade-available"
+        audit.tag_too_large = "seadex-too-large"
+        audit.al_cache = {}
+        return audit
+
+    def _results(self, n):
+        return [_make_result(sonarr_id=i, seadex_status="full") for i in range(n)]
+
+    @patch("seadexarr.modules.audit.time.sleep", return_value=None)
+    @patch("seadexarr.modules.audit.get_anilist_thumb", return_value=(None, {}))
+    @patch("seadexarr.modules.audit.Discord")
+    def test_on_sent_fires_once_per_batch(self, _disc, _thumb, _sleep):
+        audit = self._audit()
+        sent_batches = []
+        audit._send_batch_discord(
+            self._results(23), old_states={}, on_sent=sent_batches.append
+        )
+        # 23 results -> batches of 10, 10, 3
+        self.assertEqual([len(b) for b in sent_batches], [10, 10, 3])
+
+    @patch("seadexarr.modules.audit.time.sleep", return_value=None)
+    @patch("seadexarr.modules.audit.get_anilist_thumb", return_value=(None, {}))
+    @patch("seadexarr.modules.audit.Discord")
+    def test_crash_mid_notify_leaves_later_batches_unstamped(self, disc, _thumb, _sleep):
+        audit = self._audit()
+        # First post succeeds, second raises -> only the first batch is stamped.
+        disc.return_value.post.side_effect = [None, RuntimeError("429")]
+        stamped = []
+        with self.assertRaises(RuntimeError):
+            audit._send_batch_discord(
+                self._results(15), old_states={}, on_sent=stamped.append
+            )
+        self.assertEqual(len(stamped), 1)
+        self.assertEqual(len(stamped[0]), 10)  # only the first batch
+
+    @patch("seadexarr.modules.audit.time.sleep", return_value=None)
+    @patch("seadexarr.modules.audit.get_anilist_thumb", return_value=(None, {}))
+    @patch("seadexarr.modules.audit.Discord")
+    def test_single_send_stamps_after_post(self, _disc, _thumb, _sleep):
+        audit = self._audit()
+        stamped = []
+        audit._send_single_discord(
+            _make_result(seadex_status="full"), old_state=None, on_sent=stamped.append
+        )
+        self.assertEqual(len(stamped), 1)
+
+
+# ---------------------------------------------------------------------------
 # alt_is_acceptable
 # ---------------------------------------------------------------------------
 
@@ -548,6 +813,10 @@ class TestAltIsAcceptable(unittest.TestCase):
 
         release_dict = {rg: {"size": [1_000_000_000]} for rg in library_rgs}
         seadex_dict = {"BestGroup": {"urls": {}}}
+
+        # Seed the AniList cache so _audit_al_id's format lookup is a cache hit
+        # (no live network call) — mirrors get_anilist_title warming the cache.
+        audit.al_cache = {12345: {"data": {"Media": {"format": "TV"}}}}
 
         with patch.object(audit, "get_seadex_entry", return_value=mock_sd_entry), \
              patch.object(audit, "get_anilist_title", return_value="Test Show"), \
@@ -627,6 +896,9 @@ class TestAltIsAcceptable(unittest.TestCase):
         release_dict = {rg: {"size": [1_000_000_000]} for rg in library_rgs}
         seadex_dict = {"BestGroup": {"urls": {}}}
         mock_filter = MagicMock(return_value=(True, seadex_dict))
+
+        # Seed the AniList cache so the format lookup is a cache hit (no network).
+        audit.al_cache = {12345: {"data": {"Media": {"format": "TV"}}}}
 
         with patch.object(audit, "get_seadex_entry", return_value=mock_sd_entry), \
              patch.object(audit, "get_anilist_title", return_value="Test Show"), \
