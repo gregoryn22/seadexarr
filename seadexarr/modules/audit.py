@@ -377,6 +377,11 @@ class SeaDexAudit(SeaDexSonarr):
             # and name the best one the user could move to.
             "seadex_best_rgs": [],
             "seadex_alt_rgs": [],
+            # Smallest alt release (name + total bytes) so an upgrade notification
+            # can offer a smaller alt to grab instead of the best recommendation
+            # — relevant when alt_is_acceptable and you own neither tier.
+            "alt_release_rg": None,
+            "alt_release_size_bytes": 0,
             "library_rgs": [],
             "library_size_bytes": 0,
             "upgrade_available": False,
@@ -431,6 +436,9 @@ class SeaDexAudit(SeaDexSonarr):
         best_rgs, alt_rgs = self._seadex_rg_tiers(sd_entry)
         out["seadex_best_rgs"] = sorted(best_rgs)
         out["seadex_alt_rgs"] = sorted(alt_rgs)
+        alt_rg, alt_size = self._smallest_alt_release(sd_entry, alt_rgs)
+        out["alt_release_rg"] = alt_rg
+        out["alt_release_size_bytes"] = alt_size
         owned_sd_rgs = set(out["library_rgs"]) & (best_rgs | alt_rgs)
         acceptable_alt_owned = self.alt_is_acceptable and bool(owned_sd_rgs)
 
@@ -516,6 +524,34 @@ class SeaDexAudit(SeaDexSonarr):
         best_rgs = {t.release_group for t in candidates if t.is_best}
         alt_rgs = {t.release_group for t in candidates if not t.is_best} - best_rgs
         return best_rgs, alt_rgs
+
+    def _smallest_alt_release(self, sd_entry, alt_rgs=None) -> tuple[Optional[str], int]:
+        """Smallest alt (non-best) release as ``(release_group, total_bytes)``,
+        honoring the same tracker/public/ignore filters as the tiers. Each
+        torrent's total is the sum of its file sizes; the smallest single torrent
+        among the alt groups wins. ``(None, 0)`` if no alt has a known size.
+
+        Pass ``alt_rgs`` to reuse an already-computed alt set, else it's derived.
+        """
+        if alt_rgs is None:
+            _, alt_rgs = self._seadex_rg_tiers(sd_entry)
+        candidates = [
+            t for t in sd_entry.torrents
+            if t.release_group in alt_rgs
+            and not set(self.ignore_tags) & set(t.tags)
+            and t.tracker.lower() in self.trackers
+        ]
+        if self.public_only:
+            candidates = [t for t in candidates if t.tracker.is_public()]
+
+        best: Optional[tuple[int, str]] = None
+        for t in candidates:
+            total = sum(f.size for f in t.files if getattr(f, "size", 0))
+            if total <= 0:
+                continue
+            if best is None or total < best[0]:
+                best = (total, t.release_group)
+        return (best[1], best[0]) if best else (None, 0)
 
     def _library_has_seadex_rg(self, sd_entry, library_rgs) -> bool:
         """True if the library holds any SeaDex-listed release group (best or
@@ -685,11 +721,27 @@ class SeaDexAudit(SeaDexSonarr):
 
         lines = [head]
 
-        # When alt releases are acceptable and the library is covered by an alt
-        # (not a best), name the alt and the best release the user could move to.
-        if getattr(self, "alt_is_acceptable", False) \
-                and not entry.get("upgrade_available") \
-                and not entry.get("too_large"):
+        alt_acceptable = getattr(self, "alt_is_acceptable", False)
+        actionable = entry.get("upgrade_available") or entry.get("too_large")
+
+        # Upgrade/too-large case: you own neither best nor alt (else the upgrade
+        # would have been suppressed). When alts are acceptable, offer the
+        # smallest alt as a lighter alternative to the best recommendation —
+        # especially valuable when the best is flagged too large but an alt fits.
+        if alt_acceptable and actionable:
+            alt_bytes = entry.get("alt_release_size_bytes", 0)
+            alt_rg = entry.get("alt_release_rg")
+            if alt_bytes > 0 and alt_rg:
+                alt_gb = alt_bytes / BYTES_PER_GB
+                alt_delta = alt_gb - lib_bytes / BYTES_PER_GB
+                lines.append(
+                    f"↳ alt option: {alt_gb:.1f} GB ({alt_delta:+.1f} GB vs yours) "
+                    f"via {alt_rg}"
+                )
+
+        # Covered-by-alt case: name the owned alt and the best release the user
+        # could move to.
+        if alt_acceptable and not actionable:
             best_rgs = entry.get("seadex_best_rgs") or []
             alt_rgs = entry.get("seadex_alt_rgs") or []
             owned = set(entry.get("library_rgs") or [])

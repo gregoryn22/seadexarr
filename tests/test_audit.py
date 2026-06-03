@@ -785,6 +785,58 @@ class TestNotificationRendering(unittest.TestCase):
             any("alt release" in l for l in audit._item_lines(entry))
         )
 
+    def test_item_lines_upgrade_offers_smaller_alt(self):
+        audit = self._audit()
+        audit.alt_is_acceptable = True
+        entry = self._entry(
+            upgrade_available=True,
+            seadex_size_bytes=12 * 1024**3,
+            library_size_bytes=9 * 1024**3,
+            alt_release_rg="AltGroup",
+            alt_release_size_bytes=8 * 1024**3,
+        )
+        alt = next((l for l in audit._item_lines(entry) if "alt option" in l), None)
+        self.assertIsNotNone(alt)
+        self.assertIn("8.0 GB", alt)
+        self.assertIn("-1.0 GB", alt)
+        self.assertIn("AltGroup", alt)
+
+    def test_item_lines_too_large_offers_alt_that_fits(self):
+        audit = self._audit()
+        audit.alt_is_acceptable = True
+        entry = self._entry(
+            upgrade_available=True,
+            too_large=True,
+            seadex_size_bytes=90 * 1024**3,
+            library_size_bytes=10 * 1024**3,
+            alt_release_rg="AltGroup",
+            alt_release_size_bytes=7 * 1024**3,
+        )
+        lines = audit._item_lines(entry)
+        self.assertTrue(any("too large" in l for l in lines))
+        alt = next((l for l in lines if "alt option" in l), None)
+        self.assertIsNotNone(alt)
+        self.assertIn("7.0 GB", alt)
+
+    def test_item_lines_no_alt_option_when_feature_disabled(self):
+        audit = self._audit()  # disabled
+        entry = self._entry(
+            upgrade_available=True,
+            alt_release_rg="AltGroup",
+            alt_release_size_bytes=8 * 1024**3,
+        )
+        self.assertFalse(any("alt option" in l for l in audit._item_lines(entry)))
+
+    def test_item_lines_no_alt_option_when_size_unknown(self):
+        audit = self._audit()
+        audit.alt_is_acceptable = True
+        entry = self._entry(
+            upgrade_available=True,
+            alt_release_rg=None,
+            alt_release_size_bytes=0,
+        )
+        self.assertFalse(any("alt option" in l for l in audit._item_lines(entry)))
+
 
 # ---------------------------------------------------------------------------
 # Incremental notify marking (per-batch, crash-safe)
@@ -934,6 +986,49 @@ class TestAltIsAcceptable(unittest.TestCase):
         best, alt = audit._seadex_rg_tiers(sd_entry)
         self.assertEqual(best, {"Mixed"})
         self.assertEqual(alt, {"PureAlt"})
+
+    def _with_size(self, torrent, gb):
+        torrent.files = [MagicMock(size=int(gb * 1024**3))]
+        return torrent
+
+    def test_smallest_alt_release_picks_min(self):
+        audit = self._make_audit(alt_is_acceptable=True)
+        sd = MagicMock()
+        sd.torrents = [
+            self._make_torrent("BestGroup", is_best=True),
+            self._with_size(self._make_torrent("AltBig", is_best=False), 10),
+            self._with_size(self._make_torrent("AltSmall", is_best=False), 4),
+        ]
+        rg, size = audit._smallest_alt_release(sd)
+        self.assertEqual(rg, "AltSmall")
+        self.assertEqual(size, 4 * 1024**3)
+
+    def test_smallest_alt_release_excludes_best_group(self):
+        audit = self._make_audit(alt_is_acceptable=True)
+        sd = MagicMock()
+        sd.torrents = [
+            self._with_size(self._make_torrent("BestGroup", is_best=True), 1),
+            self._with_size(self._make_torrent("AltGroup", is_best=False), 5),
+        ]
+        rg, _ = audit._smallest_alt_release(sd)
+        self.assertEqual(rg, "AltGroup")
+
+    def test_smallest_alt_release_none_when_sizes_unknown(self):
+        audit = self._make_audit(alt_is_acceptable=True)
+        sd = MagicMock()
+        sd.torrents = [self._make_torrent("Alt", is_best=False)]  # files=[]
+        self.assertEqual(audit._smallest_alt_release(sd), (None, 0))
+
+    def test_entry_exposes_smallest_alt_size(self):
+        audit = self._make_audit(alt_is_acceptable=True)
+        torrents = [
+            self._make_torrent("BestGroup", is_best=True),
+            self._with_size(self._make_torrent("AltGroup", is_best=False), 3),
+        ]
+        # Library owns neither -> upgrade stays, alt size surfaced for the embed.
+        result = self._run(audit, library_rgs=["SomethingElse"], sd_torrents=torrents)
+        self.assertEqual(result["alt_release_rg"], "AltGroup")
+        self.assertEqual(result["alt_release_size_bytes"], 3 * 1024**3)
 
     def test_alt_not_acceptable_upgrade_stays(self):
         audit = self._make_audit(alt_is_acceptable=False)

@@ -117,7 +117,12 @@ movie / special), worst-first:
   size delta vs yours.
 - **💰 free win** — same as upgrade, but the recommended release is *smaller*
   than what you hold: better quality at no extra disk cost.
-- **🔴 upgrade too large** — recommended release exceeds your size limits.
+- **🔴 upgrade too large** — recommended (best) release exceeds your size limits.
+
+When `alt_is_acceptable: true` and you own neither the best nor an alt, upgrade
+and too-large fields also offer the smallest alt as a lighter alternative:
+`↳ alt option: 7.0 GB (-3.0 GB vs yours) via AltGroup`. This is most useful on a
+too-large series, where the best is skipped but a smaller alt still fits.
 
 ---
 
