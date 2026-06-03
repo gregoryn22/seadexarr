@@ -372,6 +372,11 @@ class SeaDexAudit(SeaDexSonarr):
             "seadex_status": "none",
             "seadex_rgs": [],
             "seadex_size_bytes": 0,
+            # SeaDex release groups split by tier (after tracker/public/ignore
+            # filters) so notifications can flag when an owned release is an alt
+            # and name the best one the user could move to.
+            "seadex_best_rgs": [],
+            "seadex_alt_rgs": [],
             "library_rgs": [],
             "library_size_bytes": 0,
             "upgrade_available": False,
@@ -423,10 +428,11 @@ class SeaDexAudit(SeaDexSonarr):
         # When alt_is_acceptable, this both rescues the upgrade flag below and
         # stops filter_seadex_downloads from logging a misleading "tagging" line
         # for a series we won't actually flag.
-        acceptable_alt_owned = self.alt_is_acceptable and self._library_has_seadex_rg(
-            sd_entry=sd_entry,
-            library_rgs=out["library_rgs"],
-        )
+        best_rgs, alt_rgs = self._seadex_rg_tiers(sd_entry)
+        out["seadex_best_rgs"] = sorted(best_rgs)
+        out["seadex_alt_rgs"] = sorted(alt_rgs)
+        owned_sd_rgs = set(out["library_rgs"]) & (best_rgs | alt_rgs)
+        acceptable_alt_owned = self.alt_is_acceptable and bool(owned_sd_rgs)
 
         _, seadex_dict = self.filter_seadex_downloads(
             al_id=al_id,
@@ -495,10 +501,11 @@ class SeaDexAudit(SeaDexSonarr):
                 parts.append(f"S{season:02d}E{a:02d}" + (f"-{b:02d}" if b != a else ""))
         return ", ".join(parts)
 
-    def _library_has_seadex_rg(self, sd_entry, library_rgs) -> bool:
-        """True if the library holds any SeaDex-listed release group (best or
-        alt), honoring the same tracker/public/ignore-tag filters as
-        get_seadex_dict so acceptability matches what we'd actually grab."""
+    def _seadex_rg_tiers(self, sd_entry) -> tuple[set, set]:
+        """SeaDex release groups split into (best, alt) sets, honoring the same
+        tracker/public/ignore-tag filters as get_seadex_dict so the tiers match
+        what we'd actually grab. A group tagged best on any of its torrents
+        counts as best and is excluded from the alt set."""
         candidates = [
             t for t in sd_entry.torrents
             if not set(self.ignore_tags) & set(t.tags)
@@ -506,8 +513,16 @@ class SeaDexAudit(SeaDexSonarr):
         ]
         if self.public_only:
             candidates = [t for t in candidates if t.tracker.is_public()]
-        all_sd_rgs = {t.release_group for t in candidates}
-        return bool(set(library_rgs) & all_sd_rgs)
+        best_rgs = {t.release_group for t in candidates if t.is_best}
+        alt_rgs = {t.release_group for t in candidates if not t.is_best} - best_rgs
+        return best_rgs, alt_rgs
+
+    def _library_has_seadex_rg(self, sd_entry, library_rgs) -> bool:
+        """True if the library holds any SeaDex-listed release group (best or
+        alt), honoring the same tracker/public/ignore-tag filters as
+        get_seadex_dict so acceptability matches what we'd actually grab."""
+        best_rgs, alt_rgs = self._seadex_rg_tiers(sd_entry)
+        return bool(set(library_rgs) & (best_rgs | alt_rgs))
 
     # ------------------------------------------------------------------
     # Tags
@@ -640,8 +655,19 @@ class SeaDexAudit(SeaDexSonarr):
     def _item_lines(self, entry: dict) -> list[str]:
         """Status + detail lines for one matched item (no field name)."""
         lib = ", ".join(entry.get("library_rgs") or [])
-        sd_gb = entry.get("seadex_size_bytes", 0) / BYTES_PER_GB
-        delta_gb = sd_gb - entry.get("library_size_bytes", 0) / BYTES_PER_GB
+        sd_bytes = entry.get("seadex_size_bytes", 0)
+        lib_bytes = entry.get("library_size_bytes", 0)
+        sd_gb = sd_bytes / BYTES_PER_GB
+        delta_gb = sd_gb - lib_bytes / BYTES_PER_GB
+        # "Free win": SeaDex's recommended release is both better AND smaller, so
+        # the upgrade costs no extra disk. Only when both sizes are known, else a
+        # 0-byte unknown would masquerade as a saving.
+        free_win = (
+            entry.get("upgrade_available")
+            and sd_bytes > 0
+            and lib_bytes > 0
+            and delta_gb < 0
+        )
 
         if entry.get("too_large"):
             head = f"🔴 upgrade too large — {sd_gb:.1f} GB ({delta_gb:+.1f} GB vs yours)"
@@ -650,11 +676,31 @@ class SeaDexAudit(SeaDexSonarr):
             eps = self._format_episode_ranges(entry.get("missing_episodes", []))
             if eps:
                 detail += f", missing {eps}"
-            head = f"🟠 upgrade available — {detail}"
+            if free_win:
+                head = f"💰 free win — better AND smaller, {detail}"
+            else:
+                head = f"🟠 upgrade available — {detail}"
         else:
             head = f"🟢 covered — you have {lib}" if lib else "🟢 covered"
 
         lines = [head]
+
+        # When alt releases are acceptable and the library is covered by an alt
+        # (not a best), name the alt and the best release the user could move to.
+        if getattr(self, "alt_is_acceptable", False) \
+                and not entry.get("upgrade_available") \
+                and not entry.get("too_large"):
+            best_rgs = entry.get("seadex_best_rgs") or []
+            alt_rgs = entry.get("seadex_alt_rgs") or []
+            owned = set(entry.get("library_rgs") or [])
+            owned_alt = owned & set(alt_rgs)
+            owned_best = owned & set(best_rgs)
+            if owned_alt and not owned_best and best_rgs:
+                lines.append(
+                    f"↳ {', '.join(sorted(owned_alt))} is an alt release • "
+                    f"SeaDex best: {', '.join(best_rgs)}"
+                )
+
         # Each item maps to its own AniList entry and SeaDex page; the TVDB
         # record is series-level and shown once in the embed description.
         links = self._record_links(al_id=entry.get("al_id"), sd_url=entry.get("sd_url"))

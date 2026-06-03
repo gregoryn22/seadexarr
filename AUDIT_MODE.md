@@ -104,6 +104,23 @@ you add manually are never touched.
 
 ---
 
+## Notification detail
+
+Each Discord embed lists one field per SeaDex-tracked item (season / cour /
+movie / special), worst-first:
+
+- **🟢 covered** — your release satisfies SeaDex. When `alt_is_acceptable: true`
+  and your release is an *alt* (not the best), the field also names the best
+  release you could move to, e.g. `↳ AltGroup is an alt release • SeaDex best:
+  BestGroup`.
+- **🟠 upgrade available** — SeaDex recommends a release you don't have, with the
+  size delta vs yours.
+- **💰 free win** — same as upgrade, but the recommended release is *smaller*
+  than what you hold: better quality at no extra disk cost.
+- **🔴 upgrade too large** — recommended release exceeds your size limits.
+
+---
+
 ## State file
 
 `audit_state.json` (default `/config/audit_state.json`) tracks per-series

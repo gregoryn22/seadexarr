@@ -712,6 +712,79 @@ class TestNotificationRendering(unittest.TestCase):
         for junk in ("Coverage:", "Library:", "SeaDex:", "Changes:"):
             self.assertNotIn(junk, embed["description"])
 
+    # -- _item_lines: free-win marker + alt-tier annotation -------------------
+
+    def test_item_lines_free_win_when_upgrade_is_smaller(self):
+        audit = self._audit()
+        entry = self._entry(
+            upgrade_available=True,
+            seadex_size_bytes=6 * 1024**3,
+            library_size_bytes=10 * 1024**3,
+        )
+        head = audit._item_lines(entry)[0]
+        self.assertIn("💰 free win", head)
+        self.assertIn("better AND smaller", head)
+        self.assertIn("-4.0 GB", head)
+
+    def test_item_lines_ordinary_upgrade_when_larger(self):
+        audit = self._audit()
+        entry = self._entry(
+            upgrade_available=True,
+            seadex_size_bytes=12 * 1024**3,
+            library_size_bytes=9 * 1024**3,
+        )
+        head = audit._item_lines(entry)[0]
+        self.assertIn("🟠 upgrade available", head)
+        self.assertNotIn("free win", head)
+
+    def test_item_lines_no_free_win_when_sizes_unknown(self):
+        # 0-byte seadex size must not masquerade as a saving vs a known library.
+        audit = self._audit()
+        entry = self._entry(
+            upgrade_available=True,
+            seadex_size_bytes=0,
+            library_size_bytes=9 * 1024**3,
+        )
+        head = audit._item_lines(entry)[0]
+        self.assertNotIn("free win", head)
+
+    def test_item_lines_alt_tier_named_when_alt_acceptable(self):
+        audit = self._audit()
+        audit.alt_is_acceptable = True
+        entry = self._entry(
+            library_rgs=["AltGroup"],
+            seadex_best_rgs=["BestGroup"],
+            seadex_alt_rgs=["AltGroup"],
+        )
+        lines = audit._item_lines(entry)
+        alt_line = next((l for l in lines if "alt release" in l), None)
+        self.assertIsNotNone(alt_line)
+        self.assertIn("AltGroup", alt_line)
+        self.assertIn("SeaDex best: BestGroup", alt_line)
+
+    def test_item_lines_no_alt_note_when_owning_best(self):
+        audit = self._audit()
+        audit.alt_is_acceptable = True
+        entry = self._entry(
+            library_rgs=["BestGroup"],
+            seadex_best_rgs=["BestGroup"],
+            seadex_alt_rgs=["AltGroup"],
+        )
+        self.assertFalse(
+            any("alt release" in l for l in audit._item_lines(entry))
+        )
+
+    def test_item_lines_no_alt_note_when_feature_disabled(self):
+        audit = self._audit()  # alt_is_acceptable unset -> getattr False
+        entry = self._entry(
+            library_rgs=["AltGroup"],
+            seadex_best_rgs=["BestGroup"],
+            seadex_alt_rgs=["AltGroup"],
+        )
+        self.assertFalse(
+            any("alt release" in l for l in audit._item_lines(entry))
+        )
+
 
 # ---------------------------------------------------------------------------
 # Incremental notify marking (per-batch, crash-safe)
@@ -838,6 +911,29 @@ class TestAltIsAcceptable(unittest.TestCase):
         result = self._run(audit, library_rgs=["AltGroup"], sd_torrents=torrents)
         self.assertFalse(result["upgrade_available"])
         self.assertFalse(result["too_large"])
+
+    def test_entry_exposes_best_and_alt_tiers(self):
+        audit = self._make_audit(alt_is_acceptable=True)
+        torrents = [
+            self._make_torrent("BestGroup", is_best=True),
+            self._make_torrent("AltGroup", is_best=False),
+        ]
+        result = self._run(audit, library_rgs=["AltGroup"], sd_torrents=torrents)
+        self.assertEqual(result["seadex_best_rgs"], ["BestGroup"])
+        self.assertEqual(result["seadex_alt_rgs"], ["AltGroup"])
+
+    def test_tiers_group_best_on_any_torrent_excluded_from_alt(self):
+        # A group tagged best on one torrent and alt on another counts as best.
+        audit = self._make_audit(alt_is_acceptable=True)
+        sd_entry = MagicMock()
+        sd_entry.torrents = [
+            self._make_torrent("Mixed", is_best=True),
+            self._make_torrent("Mixed", is_best=False),
+            self._make_torrent("PureAlt", is_best=False),
+        ]
+        best, alt = audit._seadex_rg_tiers(sd_entry)
+        self.assertEqual(best, {"Mixed"})
+        self.assertEqual(alt, {"PureAlt"})
 
     def test_alt_not_acceptable_upgrade_stays(self):
         audit = self._make_audit(alt_is_acceptable=False)
