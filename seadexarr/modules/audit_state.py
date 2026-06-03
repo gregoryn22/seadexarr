@@ -9,6 +9,35 @@ SCHEMA_VERSION = 2
 
 
 @dataclass
+class MovieAuditState:
+    radarr_id: int
+    tmdb_id: Optional[int]
+    title: str
+    seadex_status: str          # none / partial / full
+    seadex_rgs: list[str] = field(default_factory=list)
+    seadex_size_bytes: int = 0
+    library_rgs: list[str] = field(default_factory=list)
+    upgrade_available: bool = False
+    too_large: bool = False
+    hardlink_mismatch: bool = False
+    last_notified: Optional[str] = None
+    last_audited: str = ""
+
+
+def movie_state_changed(old: Optional[MovieAuditState], new: MovieAuditState) -> bool:
+    if old is None:
+        return True
+    return (
+        old.seadex_status != new.seadex_status
+        or set(old.seadex_rgs) != set(new.seadex_rgs)
+        or set(old.library_rgs) != set(new.library_rgs)
+        or old.upgrade_available != new.upgrade_available
+        or old.too_large != new.too_large
+        or old.hardlink_mismatch != new.hardlink_mismatch
+    )
+
+
+@dataclass
 class SeriesAuditState:
     sonarr_id: int
     tvdb_id: Optional[int]
@@ -89,6 +118,22 @@ class AuditState:
                 too_large        INTEGER NOT NULL DEFAULT 0,
                 last_notified    TEXT,
                 last_audited     TEXT    NOT NULL DEFAULT ''
+            )
+        """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS movies (
+                radarr_id         INTEGER PRIMARY KEY,
+                tmdb_id           INTEGER,
+                title             TEXT    NOT NULL,
+                seadex_status     TEXT    NOT NULL,
+                seadex_rgs        TEXT    NOT NULL DEFAULT '[]',
+                seadex_size_bytes  INTEGER NOT NULL DEFAULT 0,
+                library_rgs       TEXT    NOT NULL DEFAULT '[]',
+                upgrade_available INTEGER NOT NULL DEFAULT 0,
+                too_large         INTEGER NOT NULL DEFAULT 0,
+                hardlink_mismatch INTEGER NOT NULL DEFAULT 0,
+                last_notified     TEXT,
+                last_audited      TEXT    NOT NULL DEFAULT ''
             )
         """)
         self._conn.commit()
@@ -214,6 +259,93 @@ class AuditState:
 
     def save(self):
         """No-op: SQLite writes are committed immediately in update_series."""
+
+    # ------------------------------------------------------------------
+    # Movies (Radarr)
+    # ------------------------------------------------------------------
+
+    def _upsert_movie_row(self, state: MovieAuditState):
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO movies
+                (radarr_id, tmdb_id, title, seadex_status, seadex_rgs,
+                 seadex_size_bytes, library_rgs, upgrade_available, too_large,
+                 hardlink_mismatch, last_notified, last_audited)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                state.radarr_id,
+                state.tmdb_id,
+                state.title,
+                state.seadex_status,
+                json.dumps(state.seadex_rgs),
+                state.seadex_size_bytes,
+                json.dumps(state.library_rgs),
+                int(state.upgrade_available),
+                int(state.too_large),
+                int(state.hardlink_mismatch),
+                state.last_notified,
+                state.last_audited,
+            ),
+        )
+
+    def _movie_row_to_state(self, row: tuple) -> MovieAuditState:
+        return MovieAuditState(
+            radarr_id=row[0],
+            tmdb_id=row[1],
+            title=row[2],
+            seadex_status=row[3],
+            seadex_rgs=json.loads(row[4]),
+            seadex_size_bytes=row[5],
+            library_rgs=json.loads(row[6]),
+            upgrade_available=bool(row[7]),
+            too_large=bool(row[8]),
+            hardlink_mismatch=bool(row[9]),
+            last_notified=row[10],
+            last_audited=row[11],
+        )
+
+    def get_movie(self, radarr_id: int) -> Optional[MovieAuditState]:
+        row = self._conn.execute(
+            "SELECT * FROM movies WHERE radarr_id = ?", (radarr_id,)
+        ).fetchone()
+        return self._movie_row_to_state(row) if row is not None else None
+
+    def update_movie(self, state: MovieAuditState, notified: bool = False):
+        now = datetime.now(timezone.utc).isoformat()
+        state.last_audited = now
+        if notified:
+            state.last_notified = now
+        self._upsert_movie_row(state)
+        self._conn.commit()
+
+    def should_notify_movie(self, new_state: MovieAuditState, discord_cfg: dict) -> bool:
+        old = self.get_movie(new_state.radarr_id)
+
+        # Hardlink mismatch always fires when first detected or when it reappears.
+        if new_state.hardlink_mismatch and (old is None or not old.hardlink_mismatch):
+            return True
+
+        if not movie_state_changed(old, new_state):
+            return discord_cfg.get("notify_on_no_change", False)
+
+        was_none = old is None or old.seadex_status == "none"
+
+        if new_state.seadex_status == "partial" and was_none:
+            return discord_cfg.get("notify_on_partial_match", True)
+
+        if new_state.seadex_status == "full" and was_none:
+            return discord_cfg.get("notify_on_new_seadex_match", True)
+
+        newly_upgrade = new_state.upgrade_available and (old is None or not old.upgrade_available)
+        if newly_upgrade:
+            return discord_cfg.get("notify_on_new_upgrade_available", True)
+
+        newly_large = new_state.too_large and (old is None or not old.too_large)
+        if newly_large:
+            return discord_cfg.get("notify_on_too_large", True)
+
+        return discord_cfg.get("notify_on_state_change", True)
 
     def close(self):
         self._conn.close()

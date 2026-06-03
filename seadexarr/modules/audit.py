@@ -15,10 +15,13 @@ from typing import Optional
 from discordwebhook import Discord
 
 from .anilist import get_anilist_format, get_anilist_thumb
-from .audit_state import AuditState, SeriesAuditState, rg_diff, state_changed
+from .audit_state import (
+    AuditState, SeriesAuditState, MovieAuditState,
+    rg_diff, state_changed, movie_state_changed,
+)
 from .log import centred_string, left_aligned_string
 from .seadex_sonarr import SeaDexSonarr, get_tvdb_season
-from .sonarr_tags import SonarrTagManager
+from .sonarr_tags import SonarrTagManager, RadarrTagManager
 
 BYTES_PER_GB = 1_073_741_824
 
@@ -51,6 +54,32 @@ class AuditResult:
     # Per-AniList-entry breakdown (one per season / cour / part / movie) so
     # notifications can name exactly what is actionable and link its SeaDex page.
     entries: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class MovieAuditResult:
+    radarr_id: int
+    tmdb_id: Optional[int]
+    radarr_title: str
+    anilist_title: str
+    al_id: Optional[int]
+    sd_url: Optional[str]
+    seadex_status: str          # none / partial / full
+    seadex_rgs: list[str] = field(default_factory=list)
+    seadex_size_bytes: int = 0
+    library_rgs: list[str] = field(default_factory=list)
+    library_size_bytes: int = 0
+    upgrade_available: bool = False
+    too_large: bool = False
+    desired_tags: list[str] = field(default_factory=list)
+    notify: bool = False
+    error: Optional[str] = None
+    entries: list[dict] = field(default_factory=list)
+    # Cross-reference: populated when this movie's al_id also maps to a Sonarr special
+    sonarr_specials_title: Optional[str] = None
+    sonarr_specials_rgs: list[str] = field(default_factory=list)
+    hardlink_candidate: bool = False   # same RG in both — verify hard-link
+    hardlink_mismatch: bool = False    # different RGs — hard-link not possible as-is
 
 
 class SeaDexAudit(SeaDexSonarr):
@@ -106,6 +135,14 @@ class SeaDexAudit(SeaDexSonarr):
             sonarr_url=self.sonarr_url,
             sonarr_api_key=self.sonarr_api_key,
         )
+
+        self.audit_include_radarr: bool = audit_cfg.get("include_radarr", True)
+        self.radarr_tag_manager: Optional[RadarrTagManager] = None
+        if self.radarr is not None and self.audit_include_radarr:
+            self.radarr_tag_manager = RadarrTagManager(
+                radarr_url=self.radarr.radarr_url,
+                radarr_api_key=self.radarr.radarr_api_key,
+            )
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -266,12 +303,143 @@ class SeaDexAudit(SeaDexSonarr):
                     )
             stats["notified"] = len(to_notify)
 
+        # ------------------------------------------------------------------
+        # Radarr audit
+        # ------------------------------------------------------------------
+
+        movie_results: list[MovieAuditResult] = []
+        movie_old_states: dict[int, Optional[MovieAuditState]] = {}
+        radarr_stats: dict[str, int] = {
+            "total": 0, "matched": 0, "full": 0, "partial": 0,
+            "upgrade": 0, "too_large": 0, "tagged": 0, "notified": 0,
+            "errors": 0, "hardlink_candidates": 0, "hardlink_mismatches": 0,
+        }
+
+        if (
+            self.radarr is not None
+            and self.audit_include_radarr
+            and self.all_radarr_movies
+            and not self._shutdown.is_set()
+        ):
+            all_movies = self.all_radarr_movies
+            n_movies = len(all_movies)
+            radarr_stats["total"] = n_movies
+
+            self.log_arr_start(arr="radarr", n_items=n_movies)
+
+            # Build a lookup of al_ids already seen in Sonarr specials (season 0
+            # or MOVIE-format entries). Dict lookup during Radarr pass is O(1).
+            sonarr_specials_by_al_id: dict[int, tuple[str, list[str]]] = {}
+            for r in results:
+                for entry in r.entries:
+                    al_id_e = entry.get("al_id")
+                    al_format_e = (entry.get("al_format") or "").upper()
+                    tvdb_season_e = entry.get("tvdb_season")
+                    if al_id_e and (al_format_e == "MOVIE" or tvdb_season_e == 0):
+                        sonarr_specials_by_al_id[al_id_e] = (
+                            r.sonarr_title,
+                            entry.get("library_rgs", []),
+                        )
+
+            for idx, movie in enumerate(all_movies):
+                if self._shutdown.is_set():
+                    self.logger.info(
+                        left_aligned_string(
+                            f"Audit interrupted after {idx}/{n_movies} Radarr movies.",
+                            total_length=self.log_line_length,
+                        )
+                    )
+                    break
+
+                self.log_arr_item_start(
+                    arr="radarr",
+                    item_title=movie.title,
+                    n_item=idx + 1,
+                    n_items=n_movies,
+                )
+
+                if self.audit_state is not None:
+                    movie_old_states[movie.id] = self.audit_state.get_movie(movie.id)
+
+                movie_result = self._audit_radarr_movie(movie, sonarr_specials_by_al_id)
+                movie_results.append(movie_result)
+
+                if movie_result.error:
+                    radarr_stats["errors"] += 1
+                    continue
+
+                if movie_result.seadex_status != "none":
+                    radarr_stats["matched"] += 1
+                if movie_result.seadex_status == "full":
+                    radarr_stats["full"] += 1
+                elif movie_result.seadex_status == "partial":
+                    radarr_stats["partial"] += 1
+                if movie_result.upgrade_available:
+                    radarr_stats["upgrade"] += 1
+                if movie_result.too_large:
+                    radarr_stats["too_large"] += 1
+                if movie_result.hardlink_candidate:
+                    radarr_stats["hardlink_candidates"] += 1
+                if movie_result.hardlink_mismatch:
+                    radarr_stats["hardlink_mismatches"] += 1
+
+                self._log_movie_result(movie_result)
+
+                if self.audit_state is not None:
+                    movie_result.notify = self.audit_state.should_notify_movie(
+                        new_state=self._to_movie_state(movie_result),
+                        discord_cfg=self.discord_cfg,
+                    )
+                else:
+                    movie_result.notify = (
+                        movie_result.seadex_status != "none"
+                        or movie_result.hardlink_mismatch
+                    )
+
+                do_tags = (apply_tags or self.audit_update_tags) and not notify_only
+                if do_tags and not dry_run and self.radarr_tag_manager is not None:
+                    changed = self._apply_movie_tags(movie, movie_result, dry_run=False)
+                    if changed:
+                        radarr_stats["tagged"] += 1
+                elif dry_run and do_tags:
+                    self._log_dry_run_movie_tags(movie_result)
+
+            # Persist movie state before notifications
+            if self.audit_state is not None and not dry_run:
+                for mr in movie_results:
+                    if not mr.error:
+                        self.audit_state.update_movie(self._to_movie_state(mr), notified=False)
+
+            def _mark_movies_notified(sent: list[MovieAuditResult]):
+                if self.audit_state is None or dry_run:
+                    return
+                for mr in sent:
+                    if not mr.error:
+                        self.audit_state.update_movie(self._to_movie_state(mr), notified=True)
+                self.audit_state.save()
+
+            movies_to_notify = [
+                mr for mr in movie_results
+                if mr.notify and (mr.seadex_status != "none" or mr.hardlink_mismatch)
+            ]
+            if movies_to_notify and (self.audit_notify_discord or notify_only) and self.discord_url:
+                if self.discord_cfg.get("batch_notifications", True):
+                    self._send_batch_movie_discord(
+                        movies_to_notify, movie_old_states, on_sent=_mark_movies_notified
+                    )
+                else:
+                    for mr in movies_to_notify:
+                        self._send_single_movie_discord(
+                            mr, movie_old_states.get(mr.radarr_id), on_sent=_mark_movies_notified
+                        )
+                radarr_stats["notified"] = len(movies_to_notify)
+
         # Persist the warm AniList cache so the next run skips those calls (and
         # their rate-limit sleeps). Notifications above may have added thumbnail
         # lookups, so do this after them.
         self.persist_al_cache()
 
-        self._log_summary(stats, elapsed_s=time.monotonic() - run_start)
+        self._log_summary(stats, radarr_stats, elapsed_s=time.monotonic() - run_start)
         return True
 
     # ------------------------------------------------------------------
@@ -993,6 +1161,492 @@ class SeaDexAudit(SeaDexSonarr):
             too_large=result.too_large,
         )
 
+    # ------------------------------------------------------------------
+    # Radarr audit
+    # ------------------------------------------------------------------
+
+    def _audit_radarr_movie(
+        self,
+        radarr_movie,
+        sonarr_specials_by_al_id: dict,
+    ) -> MovieAuditResult:
+        result = MovieAuditResult(
+            radarr_id=radarr_movie.id,
+            tmdb_id=radarr_movie.tmdbId,
+            radarr_title=radarr_movie.title,
+            anilist_title=radarr_movie.title,
+            al_id=None,
+            sd_url=None,
+            seadex_status="none",
+        )
+
+        try:
+            al_mappings = self.get_anilist_ids(
+                tmdb_id=radarr_movie.tmdbId,
+                imdb_id=radarr_movie.imdbId,
+                tmdb_type="movie",
+            )
+            if not al_mappings:
+                return result
+
+            radarr_release_dict = self.radarr.get_radarr_release_dict(
+                radarr_movie_id=radarr_movie.id
+            )
+
+            per_al: list[dict] = []
+            for al_id, mapping in al_mappings.items():
+                if al_id is None:
+                    continue
+                per_al.append(
+                    self._audit_radarr_al_id(radarr_movie, al_id, radarr_release_dict)
+                )
+
+            if not per_al:
+                return result
+
+            STATUS_ORDER = ["none", "partial", "full"]
+            best_status = max(
+                per_al, key=lambda d: STATUS_ORDER.index(d["seadex_status"])
+            )["seadex_status"]
+            top_entries = [d for d in per_al if d["seadex_status"] == best_status]
+            representative = top_entries[0]
+
+            result.al_id = representative["al_id"]
+            result.sd_url = representative["sd_url"]
+            result.anilist_title = representative["anilist_title"]
+            result.seadex_status = best_status
+            result.seadex_rgs = sorted(
+                {rg for d in top_entries for rg in d["seadex_rgs"]}
+            )
+            result.seadex_size_bytes = max(
+                (d["seadex_size_bytes"] for d in top_entries), default=0
+            )
+            result.library_rgs = representative["library_rgs"]
+            result.library_size_bytes = representative["library_size_bytes"]
+            result.upgrade_available = any(d["upgrade_available"] for d in per_al)
+            result.too_large = any(d["too_large"] for d in per_al)
+            result.desired_tags = self._compute_desired_tags_movie(result)
+            result.entries = per_al
+
+            # Cross-reference: check if any of these al_ids also appeared as a
+            # Sonarr special / season-0 entry during the earlier Sonarr pass.
+            for entry in per_al:
+                al_id_e = entry.get("al_id")
+                if al_id_e is None:
+                    continue
+                hit = sonarr_specials_by_al_id.get(al_id_e)
+                if hit is None:
+                    continue
+                sonarr_title, sonarr_rgs = hit
+                result.sonarr_specials_title = sonarr_title
+                result.sonarr_specials_rgs = sonarr_rgs
+                radarr_rg_set = set(result.library_rgs)
+                sonarr_rg_set = set(sonarr_rgs)
+                if radarr_rg_set and sonarr_rg_set:
+                    if radarr_rg_set & sonarr_rg_set:
+                        result.hardlink_candidate = True
+                    else:
+                        result.hardlink_mismatch = True
+                break
+
+        except Exception as e:
+            import traceback as _tb
+            result.error = str(e)
+            self.logger.error(
+                left_aligned_string(
+                    f"[Radarr] Error auditing {radarr_movie.title}: {e}",
+                    total_length=self.log_line_length,
+                )
+            )
+            for tb_line in _tb.format_exc().splitlines():
+                if tb_line.strip():
+                    self.logger.error(f"  {tb_line}")
+
+        return result
+
+    def _audit_radarr_al_id(self, radarr_movie, al_id: int, radarr_release_dict: dict) -> dict:
+        out: dict = {
+            "al_id": al_id,
+            "sd_url": None,
+            "anilist_title": radarr_movie.title,
+            "al_format": None,
+            "seadex_status": "none",
+            "seadex_rgs": [],
+            "seadex_size_bytes": 0,
+            "seadex_best_rgs": [],
+            "seadex_alt_rgs": [],
+            "alt_release_rg": None,
+            "alt_release_size_bytes": 0,
+            "library_rgs": [],
+            "library_size_bytes": 0,
+            "upgrade_available": False,
+            "too_large": False,
+        }
+
+        sd_entry = self.get_seadex_entry(al_id=al_id)
+        if sd_entry is None:
+            return out
+
+        out["sd_url"] = sd_entry.url
+        out["anilist_title"] = self.get_anilist_title(al_id=al_id, sd_entry=sd_entry)
+        out["al_format"], self.al_cache = get_anilist_format(
+            al_id=al_id, al_cache=self.al_cache
+        )
+
+        out["library_rgs"] = [k for k in radarr_release_dict if k is not None]
+        out["library_size_bytes"] = sum(
+            (v.get("size") or 0)
+            for k, v in radarr_release_dict.items()
+            if k is not None and isinstance(v.get("size"), (int, float))
+        )
+
+        seadex_dict = self.get_seadex_dict(sd_entry=sd_entry)
+        if not seadex_dict:
+            return out
+
+        out["seadex_status"] = "full"
+        out["seadex_rgs"] = list(seadex_dict.keys())
+        out["seadex_size_bytes"] = self._sum_seadex_size(seadex_dict)
+
+        best_rgs, alt_rgs = self._seadex_rg_tiers(sd_entry)
+        out["seadex_best_rgs"] = sorted(best_rgs)
+        out["seadex_alt_rgs"] = sorted(alt_rgs)
+        alt_rg, alt_size = self._smallest_alt_release(sd_entry, alt_rgs)
+        out["alt_release_rg"] = alt_rg
+        out["alt_release_size_bytes"] = alt_size
+
+        owned_sd_rgs = set(out["library_rgs"]) & (best_rgs | alt_rgs)
+        acceptable_alt_owned = self.alt_is_acceptable and bool(owned_sd_rgs)
+
+        # filter_by_release_group expects string keys and list-valued sizes.
+        # Radarr's get_radarr_release_dict uses None key when no release group
+        # exists and stores size as a scalar int — strip None keys, wrap sizes.
+        radarr_release_dict_norm = {
+            rg: {
+                **data,
+                "size": (
+                    [data["size"]]
+                    if isinstance(data.get("size"), (int, float))
+                    else (data.get("size") or [])
+                ),
+            }
+            for rg, data in radarr_release_dict.items()
+            if rg is not None
+        }
+
+        _, seadex_dict = self.filter_seadex_downloads(
+            al_id=al_id,
+            seadex_dict=seadex_dict,
+            arr="radarr",
+            arr_release_dict=radarr_release_dict_norm,
+            acceptable_alt_owned=acceptable_alt_owned,
+        )
+        out["upgrade_available"] = self.get_any_to_download(seadex_dict=seadex_dict)
+
+        if out["upgrade_available"] and self.size_filter_enabled:
+            sd_gb = out["seadex_size_bytes"] / BYTES_PER_GB
+            lib_bytes = out["library_size_bytes"]
+            ratio = (out["seadex_size_bytes"] / lib_bytes) if lib_bytes > 0 else 0
+            if sd_gb > self.max_absolute_gb or ratio > self.max_size_multiplier:
+                out["too_large"] = True
+
+        if (out["upgrade_available"] or out["too_large"]) and acceptable_alt_owned:
+            out["upgrade_available"] = False
+            out["too_large"] = False
+
+        return out
+
+    def _compute_desired_tags_movie(self, result: MovieAuditResult) -> list[str]:
+        tags: list[str] = []
+        if result.seadex_status == "full":
+            tags.append(self.tag_full)
+        elif result.seadex_status == "partial":
+            tags.append(self.tag_partial)
+        if result.upgrade_available:
+            if result.too_large and self.tag_when_too_large:
+                tags.append(self.tag_too_large)
+            else:
+                tags.append(self.tag_upgrade)
+        return tags
+
+    def _apply_movie_tags(
+        self, radarr_movie, result: MovieAuditResult, dry_run: bool
+    ) -> bool:
+        if self.radarr_tag_manager is None:
+            return False
+        try:
+            movie_json = self.radarr_tag_manager.get_movie_json(radarr_movie.id)
+            current_tags = movie_json.get("tags", [])
+            new_tags, changed = self.radarr_tag_manager.compute_tag_changes(
+                current_tag_ids=current_tags,
+                desired_labels=result.desired_tags,
+                managed_labels=self.managed_tag_labels,
+                remove_stale=self.audit_remove_stale,
+            )
+            if changed:
+                self.radarr_tag_manager.set_movie_tags(
+                    radarr_movie.id, new_tags, dry_run=dry_run
+                )
+                self.logger.info(
+                    centred_string(
+                        f"[Radarr] Tags updated for {result.radarr_title}: {result.desired_tags}",
+                        total_length=self.log_line_length,
+                    )
+                )
+            return changed
+        except Exception as e:
+            self.logger.error(
+                left_aligned_string(
+                    f"[Radarr] Tag update failed for {result.radarr_title}: {e}",
+                    total_length=self.log_line_length,
+                )
+            )
+            return False
+
+    def _log_dry_run_movie_tags(self, result: MovieAuditResult):
+        self.logger.info(
+            centred_string(
+                f"[DRY RUN] [Radarr] {result.radarr_title} → tags: {result.desired_tags}",
+                total_length=self.log_line_length,
+            )
+        )
+
+    def _to_movie_state(self, result: MovieAuditResult) -> MovieAuditState:
+        return MovieAuditState(
+            radarr_id=result.radarr_id,
+            tmdb_id=result.tmdb_id,
+            title=result.radarr_title,
+            seadex_status=result.seadex_status,
+            seadex_rgs=result.seadex_rgs,
+            seadex_size_bytes=result.seadex_size_bytes,
+            library_rgs=result.library_rgs,
+            upgrade_available=result.upgrade_available,
+            too_large=result.too_large,
+            hardlink_mismatch=result.hardlink_mismatch,
+        )
+
+    # ------------------------------------------------------------------
+    # Radarr Discord
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _embed_colour_movie(result: MovieAuditResult) -> int:
+        if result.hardlink_mismatch:
+            return _COLOUR_TOO_LARGE
+        if result.too_large:
+            return _COLOUR_TOO_LARGE
+        if result.upgrade_available:
+            return _COLOUR_UPGRADE
+        if result.seadex_status == "full":
+            return _COLOUR_FULL
+        if result.seadex_status == "partial":
+            return _COLOUR_PARTIAL
+        return _COLOUR_NONE
+
+    def _verdict_movie(self, result: MovieAuditResult) -> tuple[str, str]:
+        if result.hardlink_mismatch:
+            return "⚠️", "hard-link mismatch"
+        if result.too_large:
+            return "🔴", "upgrade skipped (too large)"
+        if result.upgrade_available:
+            return "🟠", "better release available"
+        if result.seadex_status == "partial":
+            return "🟡", "partially tracked"
+        if result.seadex_status == "full":
+            return "🟢", "covered, nothing to do"
+        return "⚪", "no SeaDex match"
+
+    def _summary_sentence_movie(
+        self,
+        result: MovieAuditResult,
+        old_state: Optional[MovieAuditState],
+    ) -> str:
+        was_new = old_state is None or old_state.seadex_status == "none"
+        have = (
+            f"your release ({', '.join(result.library_rgs)})"
+            if result.library_rgs
+            else "your library"
+        )
+
+        if result.hardlink_mismatch:
+            radarr_rg = ", ".join(result.library_rgs) or "no file"
+            sonarr_rg = ", ".join(result.sonarr_specials_rgs) or "no file"
+            return (
+                f"This movie is also in Sonarr specials ({result.sonarr_specials_title}) "
+                f"but with a different release group — "
+                f"Radarr: {radarr_rg}, Sonarr: {sonarr_rg}. "
+                f"Hard-linking is not possible as-is."
+            )
+
+        if result.too_large:
+            sd_gb = result.seadex_size_bytes / BYTES_PER_GB
+            delta_gb = sd_gb - result.library_size_bytes / BYTES_PER_GB
+            return (
+                f"SeaDex's recommended release is {sd_gb:.1f} GB "
+                f"({delta_gb:+.1f} GB vs yours) — over your size limit. "
+                f"Tagged `{self.tag_too_large}` — not downloaded."
+            )
+
+        if result.upgrade_available:
+            lead = "SeaDex now tracks this and recommends" if was_new else "SeaDex recommends"
+            return (
+                f"{lead} a release you don't have yet. "
+                f"Tagged `{self.tag_upgrade}` — not downloaded (audit mode)."
+            )
+
+        if result.seadex_status == "partial":
+            return "SeaDex covers some entries for this title but not all."
+
+        if result.seadex_status != "full":
+            return "SeaDex has no tracked release for this title."
+
+        if was_new:
+            return f"SeaDex now tracks this title and {have} is on its list."
+
+        return f"SeaDex still tracks this title and {have} is on its list."
+
+    def _build_movie_embed(
+        self,
+        result: MovieAuditResult,
+        old_state: Optional[MovieAuditState],
+    ) -> dict:
+        emoji, verdict = self._verdict_movie(result)
+        title = result.anilist_title or result.radarr_title
+        headline = f"{emoji} {title} — {verdict}"
+
+        desc_parts = [self._summary_sentence_movie(result, old_state)]
+
+        fields: list[dict] = []
+
+        # Status field for the movie itself
+        lib = ", ".join(result.library_rgs) if result.library_rgs else None
+        sd_gb = result.seadex_size_bytes / BYTES_PER_GB
+        lib_bytes = result.library_size_bytes
+        delta_gb = sd_gb - lib_bytes / BYTES_PER_GB
+        free_win = (
+            result.upgrade_available
+            and result.seadex_size_bytes > 0
+            and lib_bytes > 0
+            and delta_gb < 0
+        )
+        if result.too_large:
+            status_val = f"🔴 upgrade too large — {sd_gb:.1f} GB ({delta_gb:+.1f} GB vs yours)"
+        elif result.upgrade_available:
+            if free_win:
+                status_val = f"💰 free win — better AND smaller, {sd_gb:.1f} GB ({delta_gb:+.1f} GB vs yours)"
+            else:
+                status_val = f"🟠 upgrade available — {sd_gb:.1f} GB ({delta_gb:+.1f} GB vs yours)"
+        else:
+            status_val = f"🟢 covered — you have {lib}" if lib else "🟢 covered"
+
+        links = self._record_links(al_id=result.al_id, sd_url=result.sd_url)
+        if links:
+            status_val += f"\n{links}"
+        fields.append({"name": "Movie", "value": status_val[:1024], "inline": False})
+
+        # Cross-reference field
+        if result.sonarr_specials_title:
+            if result.hardlink_mismatch:
+                xref_name = "⚠️ Hard-link mismatch"
+                radarr_rg_str = ", ".join(result.library_rgs) or "no file"
+                sonarr_rg_str = ", ".join(result.sonarr_specials_rgs) or "no file"
+                xref_val = (
+                    f"Also in Sonarr specials: **{result.sonarr_specials_title}**\n"
+                    f"Radarr: {radarr_rg_str} · Sonarr: {sonarr_rg_str}\n"
+                    f"Different release groups — hard-link not possible as-is."
+                )
+            elif result.hardlink_candidate:
+                xref_name = "✅ Hard-link candidate"
+                xref_val = (
+                    f"Also in Sonarr specials: **{result.sonarr_specials_title}**\n"
+                    f"Same release group — verify hard-link is configured."
+                )
+            else:
+                xref_name = "ℹ️ Also in Sonarr specials"
+                xref_val = result.sonarr_specials_title or ""
+            fields.append({"name": xref_name, "value": xref_val[:1024], "inline": False})
+
+        # TMDB record link in description
+        if result.tmdb_id:
+            desc_parts.append(
+                f"[TMDB](https://www.themoviedb.org/movie/{result.tmdb_id})"
+            )
+
+        embed: dict = {
+            "author": {
+                "name": "SeaDexArr Audit",
+                "url": "https://github.com/bbtufty/seadexarr",
+            },
+            "title": headline[:256],
+            "description": "\n\n".join(desc_parts),
+            "color": self._embed_colour_movie(result),
+        }
+        if result.sd_url:
+            embed["url"] = result.sd_url
+        if fields:
+            embed["fields"] = fields
+
+        anilist_thumb, self.al_cache = get_anilist_thumb(
+            al_id=result.al_id, al_cache=self.al_cache
+        )
+        if anilist_thumb:
+            embed["thumbnail"] = {"url": anilist_thumb}
+
+        return embed
+
+    def _send_single_movie_discord(
+        self,
+        result: MovieAuditResult,
+        old_state: Optional[MovieAuditState],
+        on_sent=None,
+    ):
+        if not self.discord_url:
+            return
+        from discordwebhook import Discord
+        discord = Discord(url=self.discord_url)
+        discord.post(embeds=[self._build_movie_embed(result, old_state)])
+        if on_sent is not None:
+            on_sent([result])
+        time.sleep(1)
+
+    def _send_batch_movie_discord(
+        self,
+        results: list[MovieAuditResult],
+        old_states: dict[int, Optional[MovieAuditState]],
+        on_sent=None,
+    ):
+        if not self.discord_url or not results:
+            return
+        from discordwebhook import Discord
+        BATCH_SIZE = 10
+        for i in range(0, len(results), BATCH_SIZE):
+            batch = results[i : i + BATCH_SIZE]
+            embeds = [
+                self._build_movie_embed(mr, old_states.get(mr.radarr_id)) for mr in batch
+            ]
+            discord = Discord(url=self.discord_url)
+            discord.post(embeds=embeds)
+            if on_sent is not None:
+                on_sent(batch)
+            time.sleep(1)
+
+    def _log_movie_result(self, result: MovieAuditResult):
+        status_str = result.seadex_status
+        if result.upgrade_available:
+            status_str += " | upgrade-available"
+        if result.too_large:
+            status_str += " | too-large"
+        if result.hardlink_mismatch:
+            status_str += " | hardlink-mismatch"
+        elif result.hardlink_candidate:
+            status_str += " | hardlink-candidate"
+        self.logger.info(
+            centred_string(
+                f"[Radarr] {result.radarr_title}: {status_str}",
+                total_length=self.log_line_length,
+            )
+        )
+
     def _log_result(self, result: AuditResult):
         status_str = result.seadex_status
         if result.upgrade_available:
@@ -1006,11 +1660,17 @@ class SeaDexAudit(SeaDexSonarr):
             )
         )
 
-    def _log_summary(self, stats: dict[str, int], elapsed_s: float = 0.0):
+    def _log_summary(
+        self,
+        stats: dict[str, int],
+        radarr_stats: Optional[dict[str, int]] = None,
+        elapsed_s: float = 0.0,
+    ):
         sep = "=" * self.log_line_length
         self.logger.info(centred_string(sep, total_length=self.log_line_length))
         self.logger.info(centred_string("Audit Summary", total_length=self.log_line_length))
         self.logger.info(centred_string(sep, total_length=self.log_line_length))
+        self.logger.info(centred_string("Sonarr", total_length=self.log_line_length))
         for label, key in [
             ("Scanned", "total"),
             ("Matched to SeaDex", "matched"),
@@ -1028,8 +1688,31 @@ class SeaDexAudit(SeaDexSonarr):
                     total_length=self.log_line_length,
                 )
             )
+        if radarr_stats and radarr_stats.get("total", 0) > 0:
+            self.logger.info(centred_string("-" * self.log_line_length, total_length=self.log_line_length))
+            self.logger.info(centred_string("Radarr", total_length=self.log_line_length))
+            for label, key in [
+                ("Scanned", "total"),
+                ("Matched to SeaDex", "matched"),
+                ("Full coverage", "full"),
+                ("Partial coverage", "partial"),
+                ("Upgrade available", "upgrade"),
+                ("Too large", "too_large"),
+                ("Tags updated", "tagged"),
+                ("Notifications sent", "notified"),
+                ("Errors", "errors"),
+                ("Hard-link candidates", "hardlink_candidates"),
+                ("Hard-link mismatches", "hardlink_mismatches"),
+            ]:
+                self.logger.info(
+                    centred_string(
+                        f"{label}: {radarr_stats[key]}",
+                        total_length=self.log_line_length,
+                    )
+                )
         mins, secs = divmod(int(elapsed_s), 60)
         elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+        self.logger.info(centred_string(sep, total_length=self.log_line_length))
         self.logger.info(
             centred_string(
                 f"Duration: {elapsed_str}",
