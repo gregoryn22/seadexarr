@@ -282,7 +282,8 @@ class SeaDexArr:
         self.interactive = self.config.get("interactive", False)
 
         if logger is None:
-            log_level = self.config.get("log_level", "INFO")
+            import os as _os
+            log_level = _os.getenv("LOG_LEVEL") or self.config.get("log_level", "INFO")
             self.logger = setup_logger(log_level=log_level)
         else:
             self.logger = logger

@@ -1293,6 +1293,27 @@ class SeaDexAudit(SeaDexSonarr):
             al_id=al_id, al_cache=self.al_cache
         )
 
+        self.logger.debug(
+            left_aligned_string(
+                f"[Radarr] AL:{al_id} format={out['al_format']}",
+                total_length=self.log_line_length,
+            )
+        )
+
+        # Radarr only handles movies. If the AniList entry is explicitly a
+        # non-movie format (SPECIAL, TV, OVA, etc.), this is a bad TMDB/IMDb
+        # mapping collision — skip it. None means AniList couldn't determine
+        # the format; let those through rather than silently dropping valid entries.
+        al_fmt = (out["al_format"] or "").upper()
+        if al_fmt and al_fmt != "MOVIE":
+            self.logger.info(
+                centred_string(
+                    f"[Radarr] Skipping AL:{al_id} — format {out['al_format']} ≠ MOVIE (bad mapping?)",
+                    total_length=self.log_line_length,
+                )
+            )
+            return out
+
         out["library_rgs"] = [k for k in radarr_release_dict if k is not None]
         out["library_size_bytes"] = sum(
             (v.get("size") or 0)
@@ -1538,6 +1559,36 @@ class SeaDexAudit(SeaDexSonarr):
                 status_val = f"🟠 upgrade available — {sd_gb:.1f} GB ({delta_gb:+.1f} GB vs yours)"
         else:
             status_val = f"🟢 covered — you have {lib}" if lib else "🟢 covered"
+
+        # Alt-release lines — mirrors _item_lines logic, pulling per-al-id
+        # detail from the representative entry.
+        alt_lines: list[str] = []
+        rep = result.entries[0] if result.entries else {}
+        actionable = result.upgrade_available or result.too_large
+        if self.alt_is_acceptable and actionable:
+            alt_bytes = rep.get("alt_release_size_bytes", 0)
+            alt_rg = rep.get("alt_release_rg")
+            if alt_bytes > 0 and alt_rg:
+                alt_gb = alt_bytes / BYTES_PER_GB
+                alt_delta = alt_gb - lib_bytes / BYTES_PER_GB
+                alt_lines.append(
+                    f"↳ alt option: {alt_gb:.1f} GB ({alt_delta:+.1f} GB vs yours) "
+                    f"via {alt_rg}"
+                )
+        if self.alt_is_acceptable and not actionable:
+            best_rgs = rep.get("seadex_best_rgs") or []
+            alt_rgs = rep.get("seadex_alt_rgs") or []
+            owned = set(result.library_rgs)
+            owned_alt = owned & set(alt_rgs)
+            owned_best = owned & set(best_rgs)
+            if owned_alt and not owned_best and best_rgs:
+                alt_lines.append(
+                    f"↳ {', '.join(sorted(owned_alt))} is an alt release • "
+                    f"SeaDex best: {', '.join(best_rgs)}"
+                )
+
+        if alt_lines:
+            status_val += "\n" + "\n".join(alt_lines)
 
         links = self._record_links(al_id=result.al_id, sd_url=result.sd_url)
         if links:

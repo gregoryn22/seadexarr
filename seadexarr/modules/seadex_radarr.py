@@ -4,6 +4,7 @@ import requests
 import arrapi.exceptions
 from arrapi import RadarrAPI
 
+from .anilist import get_anilist_format
 from .discord import discord_push
 from .log import centred_string
 from .seadex_arr import SeaDexArr
@@ -140,6 +141,22 @@ class SeaDexRadarr(SeaDexArr):
                         al_id=al_id,
                         sd_entry=sd_entry,
                     )
+
+                    # Skip non-movie AniList entries — a TMDB/IMDb collision with
+                    # a SPECIAL or TV entry indicates a bad upstream mapping.
+                    al_format, self.al_cache = get_anilist_format(
+                        al_id=al_id, al_cache=self.al_cache
+                    )
+                    al_fmt = (al_format or "").upper()
+                    if al_fmt and al_fmt != "MOVIE":
+                        self.logger.info(
+                            centred_string(
+                                f"Skipping AL:{al_id} ({anilist_title}) — "
+                                f"format {al_format} ≠ MOVIE (bad mapping?)",
+                                total_length=self.log_line_length,
+                            )
+                        )
+                        continue
 
                     # Setup info for cache
                     cache_details = {
