@@ -60,6 +60,18 @@ ANIME_IDS_URL = "https://raw.githubusercontent.com/Kometa-Team/Anime-IDs/refs/he
 ANIDB_MAPPINGS_URL = "https://raw.githubusercontent.com/Anime-Lists/anime-lists/refs/heads/master/anime-list-master.xml"
 ANIBRIDGE_MAPPINGS_URL = "https://raw.githubusercontent.com/eliasbenb/PlexAniBridge-Mappings/refs/heads/v2/mappings.json"
 
+# UPSTREAM MAPPING ISSUES — where to file fixes:
+#
+# Wrong TVDB→AniList mapping (e.g. "Star Blazers" TVDB ID maps to
+# Yamato 2520 AniList ID instead of the original):
+#   → Check anime_ids.json: https://github.com/Kometa-Team/Anime-IDs
+#   → Check anibridge mappings: https://github.com/eliasbenb/PlexAniBridge-Mappings
+#
+# Wrong episode offset (e.g. SAO Ordinal Scale movie maps to Sword Art Offline
+# OVA episode in Sonarr specials, showing wrong "Have:" release group):
+#   → Fix in anime-lists: https://github.com/Anime-Lists/anime-lists
+#   → Or add an anibridge override for the specific AniList ID
+
 ALLOWED_ARRS = [
     "radarr",
     "sonarr",
@@ -846,6 +858,21 @@ class SeaDexArr:
                 "download": False,
             }
 
+        # Debug: log each SeaDex release group with its tracker so tracker-filter
+        # issues (e.g. an owned alt on a private tracker not in the allowed list)
+        # are visible without digging into the SeaDex page.
+        for rg, rg_data in seadex_release_groups.items():
+            trackers = {
+                str(url_item.get("tracker", "unknown"))
+                for url_item in rg_data.get("urls", {}).values()
+            }
+            self.logger.debug(
+                left_aligned_string(
+                    f"SeaDex release: [{rg}] tracker(s): {', '.join(sorted(trackers))}",
+                    total_length=self.log_line_length,
+                )
+            )
+
         return seadex_release_groups
 
     @staticmethod
@@ -1117,9 +1144,11 @@ class SeaDexArr:
 
         for seadex_rg, seadex_rg_item in seadex_dict.items():
 
+            first_url_item = next(iter(seadex_rg_item.get("urls", {}).values()), {})
+            rg_tracker = str(first_url_item.get("tracker", "unknown"))
             self.logger.debug(
                 left_aligned_string(
-                    f"Filtering for release group {seadex_rg}",
+                    f"Filtering for release group {seadex_rg} (tracker: {rg_tracker})",
                     total_length=self.log_line_length,
                 )
             )
@@ -1212,9 +1241,11 @@ class SeaDexArr:
 
         for seadex_rg, seadex_rg_item in seadex_dict.items():
 
+            first_url_item = next(iter(seadex_rg_item.get("urls", {}).values()), {})
+            rg_tracker = str(first_url_item.get("tracker", "unknown"))
             self.logger.debug(
                 left_aligned_string(
-                    f"Filtering for release group {seadex_rg}",
+                    f"Filtering for release group {seadex_rg} (tracker: {rg_tracker})",
                     total_length=self.log_line_length,
                 )
             )
@@ -1226,7 +1257,19 @@ class SeaDexArr:
                 seadex_episodes = url_item.get("episodes", [])
 
                 # Simple case, we have no episode mappings so
-                # just fall back to checking against release group
+                # just fall back to checking against release group.
+                #
+                # UPSTREAM NOTE: When Sonarr can't parse SeaDex filenames (non-
+                # standard naming like "Show - ep01" or movie-style filenames),
+                # seadex_episodes is empty and arr_release_groups comes entirely
+                # from get_sonarr_release_dict on the ep_list. If the upstream
+                # AniDB/AniList episode offset points to the wrong Sonarr special
+                # (e.g., maps SAO Ordinal Scale to the Sword Art Offline OVA
+                # episode rather than the movie), arr_release_groups reflects that
+                # wrong episode's release group, producing a false "Have: [OVA-rg]"
+                # report. Fix by correcting the AniDB episode offset in the
+                # upstream anime-lists repo (https://github.com/Anime-Lists/anime-lists)
+                # or by adding an override in anibridge mappings.
                 if len(seadex_episodes) == 0:
                     if seadex_rg not in arr_release_groups and not overlapping_results:
                         have_str = ", ".join(arr_release_groups) if arr_release_groups else "nothing"

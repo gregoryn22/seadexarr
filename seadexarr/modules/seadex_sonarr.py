@@ -829,6 +829,26 @@ class SeaDexSonarr(SeaDexArr):
             al_id=al_id,
         )
 
+        # Debug: show which episodes made it into the filtered list before AniDB
+        # remapping. If this shows the wrong episode (e.g., an OVA instead of
+        # the movie you actually own), the fix is upstream in the AniDB/anime-ids
+        # offset — see the UPSTREAM NOTE in filter_by_release_group.
+        if final_ep_list:
+            ep_strs = [
+                f"S{ep.get('seasonNumber', 0):02d}E{ep.get('episodeNumber', 0):02d}"
+                + (f"[{(ep.get('episodeFile') or {}).get('releaseGroup', '?')}]"
+                   if ep.get("episodeFileId", 0) != 0 else "[missing]")
+                for ep in final_ep_list[:15]
+            ]
+            if len(final_ep_list) > 15:
+                ep_strs.append(f"... ({len(final_ep_list)} total)")
+            self.logger.debug(
+                left_aligned_string(
+                    f"Episode filter result: {', '.join(ep_strs)}",
+                    total_length=self.log_line_length,
+                )
+            )
+
         if len(anidb_mapping_dict) > 0:
 
             # See if we have the AniDB mapping for each entry
@@ -954,6 +974,19 @@ class SeaDexSonarr(SeaDexArr):
                     total_length=self.log_line_length,
                 )
             )
+
+        # Debug: log which release groups are in the library for this mapping.
+        # "nothing" here means either all episodes are missing OR Sonarr has the
+        # files but releaseGroup is blank (common for manually imported files).
+        # UPSTREAM NOTE: if the wrong release group appears here (e.g., an OVA's
+        # group instead of the movie you own), the ep_list is pointing to the
+        # wrong Sonarr episode — see UPSTREAM NOTE in filter_by_release_group.
+        self.logger.debug(
+            left_aligned_string(
+                f"Library release group(s): {', '.join(sonarr_release_dict) or 'none'}",
+                total_length=self.log_line_length,
+            )
+        )
 
         return sonarr_release_dict
 

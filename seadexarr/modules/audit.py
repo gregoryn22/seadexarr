@@ -446,6 +446,40 @@ class SeaDexAudit(SeaDexSonarr):
     # Per-series audit
     # ------------------------------------------------------------------
 
+    def _series_is_ignored(self, sonarr_series) -> bool:
+        """True if the series has the seadex-ignored tag in Sonarr."""
+        try:
+            all_tags = self.tag_manager.get_all_tags()  # cached
+            ignored_id = all_tags.get(self.tag_ignored)
+            if ignored_id is None:
+                return False
+            series_tags = getattr(sonarr_series, "tags", None) or []
+            for t in series_tags:
+                tag_id = t if isinstance(t, int) else getattr(t, "id", None)
+                if tag_id == ignored_id:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _movie_is_ignored(self, radarr_movie) -> bool:
+        """True if the movie has the seadex-ignored tag in Radarr."""
+        if self.radarr_tag_manager is None:
+            return False
+        try:
+            all_tags = self.radarr_tag_manager.get_all_tags()  # cached
+            ignored_id = all_tags.get(self.tag_ignored)
+            if ignored_id is None:
+                return False
+            movie_tags = getattr(radarr_movie, "tags", None) or []
+            for t in movie_tags:
+                tag_id = t if isinstance(t, int) else getattr(t, "id", None)
+                if tag_id == ignored_id:
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _audit_series(self, sonarr_series) -> AuditResult:
         result = AuditResult(
             sonarr_id=sonarr_series.id,
@@ -456,6 +490,22 @@ class SeaDexAudit(SeaDexSonarr):
             sd_url=None,
             seadex_status="none",
         )
+
+        # Skip series manually tagged seadex-ignored in Sonarr
+        if self._series_is_ignored(sonarr_series):
+            self.logger.info(
+                centred_string(
+                    f"Skipping — tagged {self.tag_ignored}",
+                    total_length=self.log_line_length,
+                )
+            )
+            self.logger.info(
+                centred_string(
+                    "-" * self.log_line_length,
+                    total_length=self.log_line_length,
+                )
+            )
+            return result
 
         try:
             al_mappings = self.get_anilist_ids(
@@ -681,7 +731,16 @@ class SeaDexAudit(SeaDexSonarr):
         """SeaDex release groups split into (best, alt) sets, honoring the same
         tracker/public/ignore-tag filters as get_seadex_dict so the tiers match
         what we'd actually grab. A group tagged best on any of its torrents
-        counts as best and is excluded from the alt set."""
+        counts as best and is excluded from the alt set.
+
+        IMPORTANT: release groups on trackers not in self.trackers (or on private
+        trackers when public_only=True) are excluded from both sets. If you own a
+        SeaDex-listed release that lives on a tracker outside your allowed list,
+        it will NOT appear in alt_rgs, owned_sd_rgs will be empty, and
+        alt_is_acceptable will have no effect — the entry will still be flagged
+        for upgrade. Fix: add the tracker to your trackers list in config, or set
+        public_only: false if it is a private tracker.
+        """
         candidates = [
             t for t in sd_entry.torrents
             if not set(self.ignore_tags) & set(t.tags)
@@ -691,6 +750,14 @@ class SeaDexAudit(SeaDexSonarr):
             candidates = [t for t in candidates if t.tracker.is_public()]
         best_rgs = {t.release_group for t in candidates if t.is_best}
         alt_rgs = {t.release_group for t in candidates if not t.is_best} - best_rgs
+
+        self.logger.debug(
+            left_aligned_string(
+                f"SeaDex tiers — best: {sorted(best_rgs) or 'none'} | alt: {sorted(alt_rgs) or 'none'}",
+                total_length=self.log_line_length,
+            )
+        )
+
         return best_rgs, alt_rgs
 
     def _smallest_alt_release(self, sd_entry, alt_rgs=None) -> tuple[Optional[str], int]:
@@ -1179,6 +1246,22 @@ class SeaDexAudit(SeaDexSonarr):
             sd_url=None,
             seadex_status="none",
         )
+
+        # Skip movies manually tagged seadex-ignored in Radarr
+        if self._movie_is_ignored(radarr_movie):
+            self.logger.info(
+                centred_string(
+                    f"Skipping — tagged {self.tag_ignored}",
+                    total_length=self.log_line_length,
+                )
+            )
+            self.logger.info(
+                centred_string(
+                    "-" * self.log_line_length,
+                    total_length=self.log_line_length,
+                )
+            )
+            return result
 
         try:
             al_mappings = self.get_anilist_ids(
