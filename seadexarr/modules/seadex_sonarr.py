@@ -807,6 +807,14 @@ class SeaDexSonarr(SeaDexArr):
                             if not anidb_tvdbseason == tvdb_season:
                                 continue
 
+                            # For MOVIE entries mapped to TVDB season 0, anidbseason="0"
+                            # mappings describe AniDB extras/specials, not the main movie.
+                            # The movie itself lives at AniDB season 1 (handled by the
+                            # offset slice).  Using these extra-episode mappings would
+                            # override the offset and resolve to the wrong TVDB episode.
+                            if al_format == "MOVIE" and i.attrib.get("anidbseason") == "0":
+                                continue
+
                             # The TVDB side of a mapping can be a '+'-joined
                             # group (e.g. "1-1+2+3"), meaning one AniDB episode
                             # spans several TVDB episodes. Expand those so each
