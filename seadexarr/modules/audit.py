@@ -719,37 +719,38 @@ class SeaDexAudit(SeaDexSonarr):
 
         # Detect S00 episodes SeaDex tracks that are completely absent from
         # library (no file on disk), distinct from having the wrong release.
-        seadex_s00_eps = {
-            ep["episode"]
-            for rg in seadex_dict.values()
-            for url in (rg.get("urls") or {}).values()
-            for ep in url.get("episodes", [])
-            if ep.get("season") == 0
-        }
-        if seadex_s00_eps:
-            library_s00_eps = {
-                ep["episodeNumber"]
-                for ep in ep_list
-                if ep.get("seasonNumber") == 0 and ep.get("episodeFileId", 0) != 0
+        # Only applies when this entry's mapping explicitly targets season 0 —
+        # S00 episodes appearing in a main-series torrent (e.g. a bonus episode
+        # bundled with S01) are incidental and must not trigger missing_specials,
+        # since specials are audited via their own AniList entry.
+        if out.get("tvdb_season") == 0:
+            seadex_s00_eps = {
+                ep["episode"]
+                for rg in seadex_dict.values()
+                for url in (rg.get("urls") or {}).values()
+                for ep in url.get("episodes", [])
+                if ep.get("season") == 0
             }
-            missing = sorted(seadex_s00_eps - library_s00_eps)
-            out["missing_specials"] = [(0, e) for e in missing]
-            # All tracked specials absent → upgrade_available is a false positive
-            if missing and not library_s00_eps:
+            if seadex_s00_eps:
+                library_s00_eps = {
+                    ep["episodeNumber"]
+                    for ep in ep_list
+                    if ep.get("seasonNumber") == 0 and ep.get("episodeFileId", 0) != 0
+                }
+                missing = sorted(seadex_s00_eps - library_s00_eps)
+                out["missing_specials"] = [(0, e) for e in missing]
+                # All tracked specials absent → upgrade_available is a false positive
+                if missing and not library_s00_eps:
+                    out["upgrade_available"] = False
+                    out["too_large"] = False
+                    out["missing_episodes"] = []
+            elif not out["library_rgs"] and out["seadex_status"] == "full":
+                # SeaDex covers this as specials but filenames couldn't be parsed,
+                # so we can't enumerate which episodes are missing.
+                out["missing_specials_unknown"] = True
                 out["upgrade_available"] = False
                 out["too_large"] = False
                 out["missing_episodes"] = []
-        elif (
-            out.get("tvdb_season") == 0
-            and not out["library_rgs"]
-            and out["seadex_status"] == "full"
-        ):
-            # SeaDex covers this as specials but filenames couldn't be parsed,
-            # so we can't enumerate which episodes are missing.
-            out["missing_specials_unknown"] = True
-            out["upgrade_available"] = False
-            out["too_large"] = False
-            out["missing_episodes"] = []
 
         # Detect non-specials entries SeaDex tracks that are entirely absent.
         # library_rgs == [] means zero files on disk for this entry.
