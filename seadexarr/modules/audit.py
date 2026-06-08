@@ -573,6 +573,18 @@ class SeaDexAudit(SeaDexSonarr):
                 for d in per_al
             )
             result.missing_season = any(d.get("missing_season") for d in per_al)
+            if result.missing_specials:
+                for _d in per_al:
+                    _ms = _d.get("missing_specials")
+                    _msu = _d.get("missing_specials_unknown")
+                    if _ms or _msu:
+                        self.logger.debug(
+                            left_aligned_string(
+                                f"[missing_specials] al_id={_d.get('al_id')} tvdb_season={_d.get('tvdb_season')} "
+                                f"missing_specials={_ms!r} unknown={_msu!r} lib_rgs={_d.get('library_rgs')}",
+                                total_length=self.log_line_length,
+                            )
+                        )
             result.desired_tags = self._compute_desired_tags(result)
 
             # Keep every sub-entry so notifications can break down which
