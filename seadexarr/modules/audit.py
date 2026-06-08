@@ -26,11 +26,13 @@ from .sonarr_tags import SonarrTagManager, RadarrTagManager
 BYTES_PER_GB = 1_073_741_824
 
 # Discord embed colours
-_COLOUR_FULL = 0x2ECC71      # green
-_COLOUR_PARTIAL = 0xF1C40F   # yellow
-_COLOUR_UPGRADE = 0xE67E22   # orange
-_COLOUR_TOO_LARGE = 0xE74C3C # red
-_COLOUR_NONE = 0x95A5A6      # grey
+_COLOUR_FULL = 0x2ECC71           # green
+_COLOUR_PARTIAL = 0xF1C40F        # yellow
+_COLOUR_UPGRADE = 0xE67E22        # orange
+_COLOUR_TOO_LARGE = 0xE74C3C      # red
+_COLOUR_MISSING_SEASON = 0x9B59B6    # purple
+_COLOUR_MISSING_SPECIALS = 0x3498DB  # blue
+_COLOUR_NONE = 0x95A5A6           # grey
 
 
 @dataclass
@@ -48,6 +50,8 @@ class AuditResult:
     library_size_bytes: int = 0
     upgrade_available: bool = False
     too_large: bool = False
+    missing_specials: bool = False
+    missing_season: bool = False
     desired_tags: list[str] = field(default_factory=list)
     notify: bool = False
     error: Optional[str] = None
@@ -106,12 +110,16 @@ class SeaDexAudit(SeaDexSonarr):
         self.tag_partial: str = tags_cfg.get("partial_seadex", "partial-seadex")
         self.tag_upgrade: str = tags_cfg.get("upgrade_available", "seadex-upgrade-available")
         self.tag_too_large: str = tags_cfg.get("too_large", "seadex-too-large")
+        self.tag_missing_specials: str = tags_cfg.get("missing_specials", "seadex-missing-specials")
+        self.tag_missing_season: str = tags_cfg.get("missing_season", "seadex-missing-season")
         self.tag_ignored: str = tags_cfg.get("ignored", "seadex-ignored")
         self.managed_tag_labels: list[str] = [
             self.tag_full,
             self.tag_partial,
             self.tag_upgrade,
             self.tag_too_large,
+            self.tag_missing_specials,
+            self.tag_missing_season,
             self.tag_ignored,
         ]
 
@@ -202,6 +210,8 @@ class SeaDexAudit(SeaDexSonarr):
             "partial": 0,
             "upgrade": 0,
             "too_large": 0,
+            "missing_specials": 0,
+            "missing_season": 0,
             "tagged": 0,
             "notified": 0,
             "errors": 0,
@@ -249,6 +259,10 @@ class SeaDexAudit(SeaDexSonarr):
                 stats["upgrade"] += 1
             if result.too_large:
                 stats["too_large"] += 1
+            if result.missing_specials:
+                stats["missing_specials"] += 1
+            if result.missing_season:
+                stats["missing_season"] += 1
 
             self._log_result(result)
 
@@ -554,6 +568,11 @@ class SeaDexAudit(SeaDexSonarr):
 
             result.upgrade_available = any(d["upgrade_available"] for d in per_al)
             result.too_large = any(d["too_large"] for d in per_al)
+            result.missing_specials = any(
+                d.get("missing_specials") or d.get("missing_specials_unknown")
+                for d in per_al
+            )
+            result.missing_season = any(d.get("missing_season") for d in per_al)
             result.desired_tags = self._compute_desired_tags(result)
 
             # Keep every sub-entry so notifications can break down which
@@ -605,6 +624,15 @@ class SeaDexAudit(SeaDexSonarr):
             "upgrade_available": False,
             "too_large": False,
             "missing_episodes": [],
+            # S00 episodes SeaDex tracks that are absent from library entirely.
+            # List of (season, episode) pairs; empty = none missing.
+            "missing_specials": [],
+            # True when SeaDex covers this as specials but filenames couldn't be
+            # parsed so specific episode numbers are unknown.
+            "missing_specials_unknown": False,
+            # True when SeaDex tracks this non-specials entry (season/OVA/etc.)
+            # but library has zero files for it.
+            "missing_season": False,
         }
 
         sd_entry = self.get_seadex_entry(al_id=al_id)
@@ -685,6 +713,53 @@ class SeaDexAudit(SeaDexSonarr):
         # If alt releases are acceptable and the library already has any
         # SeaDex-listed release (best OR alt), don't flag for upgrade.
         if (out["upgrade_available"] or out["too_large"]) and acceptable_alt_owned:
+            out["upgrade_available"] = False
+            out["too_large"] = False
+            out["missing_episodes"] = []
+
+        # Detect S00 episodes SeaDex tracks that are completely absent from
+        # library (no file on disk), distinct from having the wrong release.
+        seadex_s00_eps = {
+            ep["episode"]
+            for rg in seadex_dict.values()
+            for url in (rg.get("urls") or {}).values()
+            for ep in url.get("episodes", [])
+            if ep.get("season") == 0
+        }
+        if seadex_s00_eps:
+            library_s00_eps = {
+                ep["episodeNumber"]
+                for ep in ep_list
+                if ep.get("seasonNumber") == 0 and ep.get("episodeFileId", 0) != 0
+            }
+            missing = sorted(seadex_s00_eps - library_s00_eps)
+            out["missing_specials"] = [(0, e) for e in missing]
+            # All tracked specials absent → upgrade_available is a false positive
+            if missing and not library_s00_eps:
+                out["upgrade_available"] = False
+                out["too_large"] = False
+                out["missing_episodes"] = []
+        elif (
+            out.get("tvdb_season") == 0
+            and not out["library_rgs"]
+            and out["seadex_status"] == "full"
+        ):
+            # SeaDex covers this as specials but filenames couldn't be parsed,
+            # so we can't enumerate which episodes are missing.
+            out["missing_specials_unknown"] = True
+            out["upgrade_available"] = False
+            out["too_large"] = False
+            out["missing_episodes"] = []
+
+        # Detect non-specials entries SeaDex tracks that are entirely absent.
+        # library_rgs == [] means zero files on disk for this entry.
+        if (
+            out["seadex_status"] == "full"
+            and not out["library_rgs"]
+            and out.get("tvdb_season") != 0
+        ):
+            out["missing_season"] = True
+            # upgrade_available is a false positive when nothing is in library
             out["upgrade_available"] = False
             out["too_large"] = False
             out["missing_episodes"] = []
@@ -812,6 +887,12 @@ class SeaDexAudit(SeaDexSonarr):
             else:
                 tags.append(self.tag_upgrade)
 
+        if result.missing_specials:
+            tags.append(self.tag_missing_specials)
+
+        if result.missing_season:
+            tags.append(self.tag_missing_season)
+
         return tags
 
     def _apply_series_tags(self, sonarr_series, result: AuditResult, dry_run: bool) -> bool:
@@ -860,6 +941,10 @@ class SeaDexAudit(SeaDexSonarr):
     def _embed_colour(result: AuditResult) -> int:
         if result.too_large:
             return _COLOUR_TOO_LARGE
+        if result.missing_season:
+            return _COLOUR_MISSING_SEASON
+        if result.missing_specials:
+            return _COLOUR_MISSING_SPECIALS
         if result.upgrade_available:
             return _COLOUR_UPGRADE
         if result.seadex_status == "full":
@@ -916,12 +1001,18 @@ class SeaDexAudit(SeaDexSonarr):
 
     @staticmethod
     def _item_rank(entry: dict) -> int:
-        """Sort priority: too-large (0) and upgrade (1) before covered (2)."""
+        """Sort priority: too-large (0), missing (1), upgrade (2), covered (3)."""
         if entry.get("too_large"):
             return 0
-        if entry.get("upgrade_available"):
+        if (
+            entry.get("missing_season")
+            or entry.get("missing_specials")
+            or entry.get("missing_specials_unknown")
+        ):
             return 1
-        return 2
+        if entry.get("upgrade_available"):
+            return 2
+        return 3
 
     def _item_lines(self, entry: dict) -> list[str]:
         """Status + detail lines for one matched item (no field name)."""
@@ -940,8 +1031,19 @@ class SeaDexAudit(SeaDexSonarr):
             and delta_gb < 0
         )
 
+        missing_specials_eps = entry.get("missing_specials", [])
+        missing_specials_unknown = entry.get("missing_specials_unknown", False)
+
         if entry.get("too_large"):
             head = f"🔴 upgrade too large — {sd_gb:.1f} GB ({delta_gb:+.1f} GB vs yours)"
+        elif entry.get("missing_season"):
+            head = "🟣 missing — in SeaDex but not in library"
+        elif missing_specials_eps or missing_specials_unknown:
+            if missing_specials_unknown:
+                head = "🔵 missing specials — in SeaDex but not in library"
+            else:
+                eps = self._format_episode_ranges(missing_specials_eps)
+                head = f"🔵 missing specials — {eps}"
         elif entry.get("upgrade_available"):
             detail = f"{sd_gb:.1f} GB ({delta_gb:+.1f} GB vs yours)"
             eps = self._format_episode_ranges(entry.get("missing_episodes", []))
@@ -1100,7 +1202,7 @@ class SeaDexAudit(SeaDexSonarr):
         and one field per SeaDex-tracked item (season / cour / movie / special)
         — covered ones included — so the reader sees exactly what matched."""
         tracked = self._tracked_items(result)
-        n_action = sum(1 for e in tracked if self._item_rank(e) < 2)
+        n_action = sum(1 for e in tracked if self._item_rank(e) < 3)
 
         emoji, verdict = self._verdict(result)
         title = result.anilist_title or result.sonarr_title
@@ -1226,6 +1328,8 @@ class SeaDexAudit(SeaDexSonarr):
             library_rgs=result.library_rgs,
             upgrade_available=result.upgrade_available,
             too_large=result.too_large,
+            missing_specials=result.missing_specials,
+            missing_season=result.missing_season,
         )
 
     # ------------------------------------------------------------------

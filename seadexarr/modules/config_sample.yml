@@ -70,6 +70,8 @@ audit:
     partial_seadex: partial-seadex
     upgrade_available: seadex-upgrade-available
     too_large: seadex-too-large
+    missing_specials: seadex-missing-specials
+    missing_season: seadex-missing-season
     ignored: seadex-ignored
 
   # If true, having any SeaDex-listed release (best OR alt) is considered
@@ -89,6 +91,8 @@ audit:
     notify_on_new_upgrade_available: true
     notify_on_partial_match: true
     notify_on_too_large: true
+    notify_on_missing_specials: true
+    notify_on_missing_season: true
     notify_on_no_change: false
     batch_notifications: true
 

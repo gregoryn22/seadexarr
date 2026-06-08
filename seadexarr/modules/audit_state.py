@@ -48,6 +48,8 @@ class SeriesAuditState:
     library_rgs: list[str] = field(default_factory=list)
     upgrade_available: bool = False
     too_large: bool = False
+    missing_specials: bool = False
+    missing_season: bool = False
     last_notified: Optional[str] = None
     last_audited: str = ""
 
@@ -64,6 +66,8 @@ def state_changed(old: Optional[SeriesAuditState], new: SeriesAuditState) -> boo
         or set(old.library_rgs) != set(new.library_rgs)
         or old.upgrade_available != new.upgrade_available
         or old.too_large != new.too_large
+        or old.missing_specials != new.missing_specials
+        or old.missing_season != new.missing_season
     )
 
 
@@ -95,6 +99,7 @@ class AuditState:
             os.makedirs(parent, exist_ok=True)
 
         self._conn = sqlite3.connect(db_path)
+        self._conn.row_factory = sqlite3.Row
         self._init_schema()
 
         if self._legacy_json and os.path.exists(self._legacy_json):
@@ -116,10 +121,22 @@ class AuditState:
                 library_rgs      TEXT    NOT NULL DEFAULT '[]',
                 upgrade_available INTEGER NOT NULL DEFAULT 0,
                 too_large        INTEGER NOT NULL DEFAULT 0,
+                missing_specials  INTEGER NOT NULL DEFAULT 0,
+                missing_season    INTEGER NOT NULL DEFAULT 0,
                 last_notified    TEXT,
                 last_audited     TEXT    NOT NULL DEFAULT ''
             )
         """)
+        # Migration: add new columns to existing databases
+        for col_def in [
+            "missing_specials INTEGER NOT NULL DEFAULT 0",
+            "missing_season INTEGER NOT NULL DEFAULT 0",
+        ]:
+            try:
+                self._conn.execute(f"ALTER TABLE series ADD COLUMN {col_def}")
+                self._conn.commit()
+            except Exception:
+                pass  # Column already exists
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS movies (
                 radarr_id         INTEGER PRIMARY KEY,
@@ -181,8 +198,8 @@ class AuditState:
             INSERT OR REPLACE INTO series
                 (sonarr_id, tvdb_id, title, seadex_status, seadex_rgs,
                  seadex_size_bytes, library_rgs, upgrade_available, too_large,
-                 last_notified, last_audited)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 missing_specials, missing_season, last_notified, last_audited)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 state.sonarr_id,
@@ -194,24 +211,28 @@ class AuditState:
                 json.dumps(state.library_rgs),
                 int(state.upgrade_available),
                 int(state.too_large),
+                int(state.missing_specials),
+                int(state.missing_season),
                 state.last_notified,
                 state.last_audited,
             ),
         )
 
-    def _row_to_state(self, row: tuple) -> SeriesAuditState:
+    def _row_to_state(self, row) -> SeriesAuditState:
         return SeriesAuditState(
-            sonarr_id=row[0],
-            tvdb_id=row[1],
-            title=row[2],
-            seadex_status=row[3],
-            seadex_rgs=json.loads(row[4]),
-            seadex_size_bytes=row[5],
-            library_rgs=json.loads(row[6]),
-            upgrade_available=bool(row[7]),
-            too_large=bool(row[8]),
-            last_notified=row[9],
-            last_audited=row[10],
+            sonarr_id=row["sonarr_id"],
+            tvdb_id=row["tvdb_id"],
+            title=row["title"],
+            seadex_status=row["seadex_status"],
+            seadex_rgs=json.loads(row["seadex_rgs"]),
+            seadex_size_bytes=row["seadex_size_bytes"],
+            library_rgs=json.loads(row["library_rgs"]),
+            upgrade_available=bool(row["upgrade_available"]),
+            too_large=bool(row["too_large"]),
+            missing_specials=bool(row["missing_specials"]),
+            missing_season=bool(row["missing_season"]),
+            last_notified=row["last_notified"],
+            last_audited=row["last_audited"],
         )
 
     # ------------------------------------------------------------------
@@ -245,6 +266,18 @@ class AuditState:
         newly_large = new_state.too_large and (old is None or not old.too_large)
         if newly_large:
             return discord_cfg.get("notify_on_too_large", True)
+
+        newly_missing_specials = new_state.missing_specials and (
+            old is None or not old.missing_specials
+        )
+        if newly_missing_specials:
+            return discord_cfg.get("notify_on_missing_specials", True)
+
+        newly_missing_season = new_state.missing_season and (
+            old is None or not old.missing_season
+        )
+        if newly_missing_season:
+            return discord_cfg.get("notify_on_missing_season", True)
 
         # State changed but no specific rule matched (e.g. partial→full when already seen)
         return discord_cfg.get("notify_on_state_change", True)
@@ -289,20 +322,20 @@ class AuditState:
             ),
         )
 
-    def _movie_row_to_state(self, row: tuple) -> MovieAuditState:
+    def _movie_row_to_state(self, row) -> MovieAuditState:
         return MovieAuditState(
-            radarr_id=row[0],
-            tmdb_id=row[1],
-            title=row[2],
-            seadex_status=row[3],
-            seadex_rgs=json.loads(row[4]),
-            seadex_size_bytes=row[5],
-            library_rgs=json.loads(row[6]),
-            upgrade_available=bool(row[7]),
-            too_large=bool(row[8]),
-            hardlink_mismatch=bool(row[9]),
-            last_notified=row[10],
-            last_audited=row[11],
+            radarr_id=row["radarr_id"],
+            tmdb_id=row["tmdb_id"],
+            title=row["title"],
+            seadex_status=row["seadex_status"],
+            seadex_rgs=json.loads(row["seadex_rgs"]),
+            seadex_size_bytes=row["seadex_size_bytes"],
+            library_rgs=json.loads(row["library_rgs"]),
+            upgrade_available=bool(row["upgrade_available"]),
+            too_large=bool(row["too_large"]),
+            hardlink_mismatch=bool(row["hardlink_mismatch"]),
+            last_notified=row["last_notified"],
+            last_audited=row["last_audited"],
         )
 
     def get_movie(self, radarr_id: int) -> Optional[MovieAuditState]:
