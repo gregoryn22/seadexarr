@@ -1320,12 +1320,32 @@ class SeaDexAudit(SeaDexSonarr):
             discord = Discord(url=self.discord_url)
             response = discord.post(embeds=embeds)
             if response is not None and not response.ok:
-                titles = ", ".join(r.sonarr_title for r in batch)
-                self.logger.warning(
-                    "Discord batch post failed (%s) for [%s]: %s",
-                    response.status_code, titles, response.text[:200],
-                )
-                time.sleep(1)
+                if len(batch) > 1:
+                    # Batch exceeded Discord's 6000-char limit — retry one at a time.
+                    self.logger.warning(
+                        "Discord batch post failed (%s) — retrying %d embeds individually",
+                        response.status_code, len(batch),
+                    )
+                    time.sleep(1)
+                    for r, embed in zip(batch, embeds):
+                        r_discord = Discord(url=self.discord_url)
+                        r_resp = r_discord.post(embeds=[embed])
+                        if r_resp is not None and not r_resp.ok:
+                            self.logger.warning(
+                                "Discord post failed for %s (%s): %s",
+                                r.sonarr_title, r_resp.status_code, r_resp.text[:200],
+                            )
+                            time.sleep(1)
+                            continue
+                        if on_sent is not None:
+                            on_sent([r])
+                        time.sleep(1)
+                else:
+                    self.logger.warning(
+                        "Discord post failed for %s (%s): %s",
+                        batch[0].sonarr_title, response.status_code, response.text[:200],
+                    )
+                    time.sleep(1)
                 continue
             # Stamp this batch as notified only after its post succeeds, so a
             # crash on a later batch never replays the batches already sent.
@@ -1900,12 +1920,31 @@ class SeaDexAudit(SeaDexSonarr):
             discord = Discord(url=self.discord_url)
             response = discord.post(embeds=embeds)
             if response is not None and not response.ok:
-                titles = ", ".join(mr.radarr_title for mr in batch)
-                self.logger.warning(
-                    "Discord batch post failed (%s) for [%s]: %s",
-                    response.status_code, titles, response.text[:200],
-                )
-                time.sleep(1)
+                if len(batch) > 1:
+                    self.logger.warning(
+                        "Discord batch post failed (%s) — retrying %d embeds individually",
+                        response.status_code, len(batch),
+                    )
+                    time.sleep(1)
+                    for mr, embed in zip(batch, embeds):
+                        r_discord = Discord(url=self.discord_url)
+                        r_resp = r_discord.post(embeds=[embed])
+                        if r_resp is not None and not r_resp.ok:
+                            self.logger.warning(
+                                "Discord post failed for %s (%s): %s",
+                                mr.radarr_title, r_resp.status_code, r_resp.text[:200],
+                            )
+                            time.sleep(1)
+                            continue
+                        if on_sent is not None:
+                            on_sent([mr])
+                        time.sleep(1)
+                else:
+                    self.logger.warning(
+                        "Discord post failed for %s (%s): %s",
+                        batch[0].radarr_title, response.status_code, response.text[:200],
+                    )
+                    time.sleep(1)
                 continue
             if on_sent is not None:
                 on_sent(batch)
