@@ -5,10 +5,10 @@ import shutil
 from datetime import datetime
 from hashlib import md5
 from itertools import compress
-from urllib.request import urlretrieve
 from xml.etree import ElementTree
 
 import httpx
+import requests
 import qbittorrentapi
 import yaml
 from ruamel.yaml import YAML
@@ -95,6 +95,10 @@ PRIVATE_TRACKERS = [
 ]
 
 UPDATED_AT_STR_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# Timeout (s) for HTTP calls to local Arr instances and external mapping
+# downloads, so one hung socket can't stall a whole run.
+REQUEST_TIMEOUT = 30
 
 
 def get_all_seadex_rgs_per_episode(
@@ -500,8 +504,14 @@ class SeaDexArr:
             url (str): url to download the file from
         """
 
+        def _download():
+            r = requests.get(url, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            with open(f, "wb") as fh:
+                fh.write(r.content)
+
         if not os.path.exists(f):
-            urlretrieve(url, f)
+            _download()
 
         # Check if this is older than the cache
         f_mtime = os.path.getmtime(f)
@@ -513,7 +523,7 @@ class SeaDexArr:
 
         # If the file is older than the cache time, re-download
         if t_diff.days >= self.cache_time:
-            urlretrieve(url, f)
+            _download()
 
         return True
 

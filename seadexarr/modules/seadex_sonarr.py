@@ -14,7 +14,7 @@ from .anilist import (
 )
 from .discord import discord_push
 from .log import centred_string, left_aligned_string
-from .seadex_arr import SeaDexArr
+from .seadex_arr import REQUEST_TIMEOUT, SeaDexArr
 from .seadex_radarr import SeaDexRadarr
 
 
@@ -707,10 +707,13 @@ class SeaDexSonarr(SeaDexArr):
             f"{self.sonarr_url}/api/v3/episode?"
             f"seriesId={sonarr_series_id}&"
             f"includeImages=false&"
-            f"includeEpisodeFile=true&"
-            f"apikey={self.sonarr_api_key}"
+            f"includeEpisodeFile=true"
         )
-        eps_req = requests.get(eps_req_url)
+        eps_req = requests.get(
+            eps_req_url,
+            headers={"X-Api-Key": self.sonarr_api_key},
+            timeout=REQUEST_TIMEOUT,
+        )
 
         if eps_req.status_code != 200:
             self.logger.warning("Failed get episodes data from Sonarr")
@@ -1116,10 +1119,14 @@ class SeaDexSonarr(SeaDexArr):
         """
 
         def parse_one(f):
-            d_enc = urlencode({"title": f, "apikey": self.sonarr_api_key})
+            d_enc = urlencode({"title": f})
             parse_req_url = f"{self.sonarr_url}/api/v3/parse?{d_enc}"
             try:
-                parse_req = requests.get(parse_req_url)
+                parse_req = requests.get(
+                    parse_req_url,
+                    headers={"X-Api-Key": self.sonarr_api_key},
+                    timeout=REQUEST_TIMEOUT,
+                )
                 return f, parse_req.json().get("episodes", [])
             except Exception as e:
                 self.logger.debug(

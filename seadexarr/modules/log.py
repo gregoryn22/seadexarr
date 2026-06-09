@@ -68,6 +68,7 @@ def setup_logger(
         "DEBUG": logging.DEBUG,
         "INFO": logging.INFO,
         "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
         "CRITICAL": logging.CRITICAL,
     }
     numeric_level = level_map.get(log_level)

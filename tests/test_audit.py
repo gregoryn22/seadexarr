@@ -1344,6 +1344,44 @@ class TestNotifyPending(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Radarr release dict: multiple movie files must not abort the movie
+# ---------------------------------------------------------------------------
+
+class TestRadarrReleaseDict(unittest.TestCase):
+
+    def _radarr(self):
+        from seadexarr.modules.seadex_radarr import SeaDexRadarr
+        sdr = SeaDexRadarr.__new__(SeaDexRadarr)
+        sdr.radarr_url = "http://radarr:7878"
+        sdr.radarr_api_key = "key"
+        sdr.log_line_length = 80
+        sdr.logger = MagicMock()
+        return sdr
+
+    def _get(self, files):
+        sdr = self._radarr()
+        resp = MagicMock()
+        resp.json.return_value = files
+        with patch("seadexarr.modules.seadex_radarr.requests.get", return_value=resp):
+            return sdr.get_radarr_release_dict(radarr_movie_id=1)
+
+    def test_single_file(self):
+        d = self._get([{"releaseGroup": "GroupA", "size": 100}])
+        self.assertEqual(d, {"GroupA": {"size": 100}})
+
+    def test_no_file(self):
+        d = self._get([])
+        self.assertEqual(d, {None: {"size": None}})
+
+    def test_multiple_files_uses_largest(self):
+        d = self._get([
+            {"releaseGroup": "Small", "size": 100},
+            {"releaseGroup": "Large", "size": 900},
+        ])
+        self.assertEqual(d, {"Large": {"size": 900}})
+
+
+# ---------------------------------------------------------------------------
 # Partial status: entry exists but every release filtered out
 # ---------------------------------------------------------------------------
 

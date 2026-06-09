@@ -7,7 +7,7 @@ from arrapi import RadarrAPI
 from .anilist import get_anilist_format
 from .discord import discord_push
 from .log import centred_string
-from .seadex_arr import SeaDexArr
+from .seadex_arr import REQUEST_TIMEOUT, SeaDexArr
 
 
 class SeaDexRadarr(SeaDexArr):
@@ -394,19 +394,33 @@ class SeaDexRadarr(SeaDexArr):
         # Get the movie file if it exists
         mov_req_url = (
             f"{self.radarr_url}/api/v3/moviefile?"
-            f"movieId={radarr_movie_id}&"
-            f"apikey={self.radarr_api_key}"
+            f"movieId={radarr_movie_id}"
         )
-        mov_req = requests.get(mov_req_url)
+        mov_req = requests.get(
+            mov_req_url,
+            headers={"X-Api-Key": self.radarr_api_key},
+            timeout=REQUEST_TIMEOUT,
+        )
 
         radarr_release_dict = {
             r.get("releaseGroup", None): {"size": r.get("size", None)}
             for r in mov_req.json()
         }
 
-        # If we have multiple options, throw up an error
+        # Multiple files (e.g. several editions): compare against the largest
+        # rather than failing the whole movie
         if len(radarr_release_dict) > 1:
-            raise ValueError(f"Multiple files found for movie {radarr_movie_id}")
+            self.logger.warning(
+                centred_string(
+                    f"Multiple files found for movie {radarr_movie_id} — "
+                    f"comparing against the largest",
+                    total_length=self.log_line_length,
+                )
+            )
+            rg, data = max(
+                radarr_release_dict.items(), key=lambda kv: kv[1].get("size") or 0
+            )
+            radarr_release_dict = {rg: data}
 
         # If we have nothing, return None
         elif len(radarr_release_dict) == 0:

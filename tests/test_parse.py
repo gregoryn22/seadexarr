@@ -70,7 +70,7 @@ class TestParseEpisodes(unittest.TestCase):
         s = _make_sonarr()
         with patch(
             "seadexarr.modules.seadex_sonarr.requests.get",
-            side_effect=lambda url: _fake_parse_response(url),
+            side_effect=lambda url, **kwargs: _fake_parse_response(url),
         ):
             out = s.parse_episodes_from_seadex(_seadex_dict())
 
@@ -99,7 +99,7 @@ class TestParseEpisodes(unittest.TestCase):
         calls = []
         lock = threading.Lock()
 
-        def tracking_get(url):
+        def tracking_get(url, **kwargs):
             with lock:
                 calls.append(url)
             return _fake_parse_response(url)
@@ -118,7 +118,7 @@ class TestParseEpisodes(unittest.TestCase):
     def test_failed_parse_is_tolerated(self):
         s = _make_sonarr()
 
-        def boom_for_e02(url):
+        def boom_for_e02(url, **kwargs):
             if "S01E02" in url:
                 raise RuntimeError("Sonarr hiccup")
             return _fake_parse_response(url)

@@ -1,5 +1,8 @@
 import requests
 
+# Timeout (s) for Arr tag API calls
+_TIMEOUT = 30
+
 
 class RadarrTagManager:
     """CRUD for Radarr tags via direct HTTP — no torrent operations."""
@@ -16,7 +19,7 @@ class RadarrTagManager:
         """Return mapping of label → tag id, cached per instance."""
         if self._tag_cache is not None:
             return self._tag_cache
-        resp = requests.get(f"{self._base}/api/v3/tag", headers=self._headers())
+        resp = requests.get(f"{self._base}/api/v3/tag", headers=self._headers(), timeout=_TIMEOUT)
         resp.raise_for_status()
         self._tag_cache = {t["label"]: t["id"] for t in resp.json()}
         return self._tag_cache
@@ -30,6 +33,7 @@ class RadarrTagManager:
             f"{self._base}/api/v3/tag",
             headers=self._headers(),
             json={"label": label},
+            timeout=_TIMEOUT,
         )
         resp.raise_for_status()
         tag_id = resp.json()["id"]
@@ -40,6 +44,7 @@ class RadarrTagManager:
         resp = requests.get(
             f"{self._base}/api/v3/movie/{movie_id}",
             headers=self._headers(),
+            timeout=_TIMEOUT,
         )
         resp.raise_for_status()
         return resp.json()
@@ -54,6 +59,7 @@ class RadarrTagManager:
             f"{self._base}/api/v3/movie/{movie_id}",
             headers=self._headers(),
             json=movie_json,
+            timeout=_TIMEOUT,
         )
         resp.raise_for_status()
         return True
@@ -93,7 +99,7 @@ class SonarrTagManager:
         """Return mapping of label → tag id, cached per instance."""
         if self._tag_cache is not None:
             return self._tag_cache
-        resp = requests.get(f"{self._base}/api/v3/tag", headers=self._headers())
+        resp = requests.get(f"{self._base}/api/v3/tag", headers=self._headers(), timeout=_TIMEOUT)
         resp.raise_for_status()
         self._tag_cache = {t["label"]: t["id"] for t in resp.json()}
         return self._tag_cache
@@ -107,6 +113,7 @@ class SonarrTagManager:
             f"{self._base}/api/v3/tag",
             headers=self._headers(),
             json={"label": label},
+            timeout=_TIMEOUT,
         )
         resp.raise_for_status()
         tag_id = resp.json()["id"]
@@ -117,6 +124,7 @@ class SonarrTagManager:
         resp = requests.get(
             f"{self._base}/api/v3/series/{series_id}",
             headers=self._headers(),
+            timeout=_TIMEOUT,
         )
         resp.raise_for_status()
         return resp.json()
@@ -131,6 +139,7 @@ class SonarrTagManager:
             f"{self._base}/api/v3/series/{series_id}",
             headers=self._headers(),
             json=series_json,
+            timeout=_TIMEOUT,
         )
         resp.raise_for_status()
         return True

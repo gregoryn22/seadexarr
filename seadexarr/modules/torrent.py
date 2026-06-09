@@ -7,6 +7,9 @@ from bs4 import BeautifulSoup
 ANIMETOSHO_FEED_URL = "https://animetosho.org/feed/json"
 RUTRACKER_MAGNET_ANNOUNCE = "http://bt2.t-ru.org/ann?magnet"
 
+# Timeout (s) for tracker page/feed fetches
+_TIMEOUT = 30
+
 
 def get_nyaa_url(url):
     """Get Nyaa torrent link from URL
@@ -28,7 +31,7 @@ def get_animetosho_url(url):
     """
 
     # Start by getting the webpage, so we can get a title
-    r = requests.get(url)
+    r = requests.get(url, timeout=_TIMEOUT)
     soup = BeautifulSoup(r.content, "html.parser")
     titles = soup.find_all("h2", attrs={"id": "title"})
 
@@ -42,7 +45,7 @@ def get_animetosho_url(url):
 
     # Fantastic, we have a title. Now query API
     query_url = urljoin(ANIMETOSHO_FEED_URL, f"?t=search&q={title}")
-    r = requests.get(query_url)
+    r = requests.get(query_url, timeout=_TIMEOUT)
     j = r.json()
 
     # Loop over, make sure the link matches the URL and get a torrent link out
@@ -71,7 +74,7 @@ def get_rutracker_url(
     """
 
     # Pull the torrent title from souping the URL
-    r = requests.get(url)
+    r = requests.get(url, timeout=_TIMEOUT)
     soup = BeautifulSoup(r.content, "lxml")
     main_title = soup.find("h1", attrs={"class": "maintitle"})
     torrent_title = main_title.text
