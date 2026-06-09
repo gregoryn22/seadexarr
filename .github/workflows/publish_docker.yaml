@@ -28,6 +28,10 @@ jobs:
 
       - name: Set up QEMU (multi-arch)
         uses: docker/setup-qemu-action@v3
+        with:
+          # Pulling binfmt fresh takes ~2s; caching it causes "Unable to
+          # reserve cache" warnings when concurrent runs race for the key.
+          cache-image: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -63,7 +67,22 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The attestation service intermittently 404s fetching the freshly
+      # written transparency-log entry (Rekor indexing lag). The image is
+      # already pushed at this point, so retry once and never fail the job
+      # over a missing attestation.
       - name: Generate artifact attestation
+        id: attest
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Retry artifact attestation
+        if: steps.attest.outcome == 'failure'
+        continue-on-error: true
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
