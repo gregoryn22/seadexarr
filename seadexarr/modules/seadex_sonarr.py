@@ -1059,17 +1059,34 @@ class SeaDexSonarr(SeaDexArr):
         # Parse the unique filenames through Sonarr in parallel
         parsed = self._parse_filenames({f for (_, _, f, _) in tasks})
 
-        # Stitch the parsed episodes back in, preserving collection order
-        for release_group, url, f, size in tasks:
-
+        # Log each unique filename's outcome once. The same torrent often
+        # appears under several tracker URLs, and logging in the stitch loop
+        # below used to duplicate every line once per URL.
+        for f in sorted({f for (_, _, f, _) in tasks}):
             episode_info = parsed.get(f)
-
             if not episode_info:
                 self.logger.debug(
                     left_aligned_string(
                         f"Sonarr could not parse episode for {f}"
                     )
                 )
+                continue
+            for ep in episode_info:
+                season = ep.get("seasonNumber", None)
+                episode = ep.get("episodeNumber", None)
+                if season is not None and episode is not None:
+                    self.logger.debug(
+                        left_aligned_string(
+                            f"{f} mapped to: S{season:02d}E{episode:02d}"
+                        )
+                    )
+
+        # Stitch the parsed episodes back in, preserving collection order
+        for release_group, url, f, size in tasks:
+
+            episode_info = parsed.get(f)
+
+            if not episode_info:
                 continue
 
             url_item = seadex_dict[release_group]["urls"][url]
@@ -1083,12 +1100,6 @@ class SeaDexSonarr(SeaDexArr):
 
                 if season is None or episode is None:
                     raise ValueError("Season or episode has come up None")
-
-                self.logger.debug(
-                    left_aligned_string(
-                        f"{f} mapped to: S{season:02d}E{episode:02d}"
-                    )
-                )
 
                 url_item["episodes"].append(
                     {

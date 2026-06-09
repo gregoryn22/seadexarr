@@ -1234,6 +1234,23 @@ class SeaDexArr:
             "have acceptable alt ✓" if acceptable_alt_owned else self._action_word()
         )
 
+        # The same torrent is often listed under several tracker URLs (same
+        # infohash), which used to emit identical log lines once per URL. Log
+        # each outcome once per torrent; the download flags themselves are
+        # still set on every URL.
+        seen_log_keys: set = set()
+
+        def log_once(log_fn, key, msg):
+            if key in seen_log_keys:
+                return
+            seen_log_keys.add(key)
+            log_fn(
+                left_aligned_string(
+                    msg,
+                    total_length=self.log_line_length,
+                )
+            )
+
         # Get a simple list of the release groups
         arr_release_groups = list(arr_release_dict.keys())
 
@@ -1302,11 +1319,10 @@ class SeaDexArr:
                         sd_tag_str = f" ({', '.join(sd_tags)})" if sd_tags else ""
                         have_part = f"[{have_str}]" + (f" ({have_size_str})" if have_size_str else "")
                         sd_part = f"[{seadex_rg}]" + (f" ({sd_size_str})" if sd_size_str else "") + sd_tag_str
-                        upgrade_log(
-                            left_aligned_string(
-                                f"Have: {have_part} | SeaDex: {sd_part} → {upgrade_verb}",
-                                total_length=self.log_line_length,
-                            )
+                        log_once(
+                            upgrade_log,
+                            (url_hash, "mismatch"),
+                            f"Have: {have_part} | SeaDex: {sd_part} → {upgrade_verb}",
                         )
 
                         url_item.update({"download": True})
@@ -1338,11 +1354,10 @@ class SeaDexArr:
                         if len(intersect) == 0:
                             have_part = f"[{seadex_rg}]" + (f" ({arr_size_str})" if arr_size_str else "")
                             sd_part = f"[{seadex_rg}]" + (f" ({sd_size_str})" if sd_size_str else "") + sd_tag_str
-                            upgrade_log(
-                                left_aligned_string(
-                                    f"Have: {have_part} | SeaDex: {sd_part} (size differs) → {upgrade_verb}",
-                                    total_length=self.log_line_length,
-                                )
+                            log_once(
+                                upgrade_log,
+                                (url_hash, "size_differs"),
+                                f"Have: {have_part} | SeaDex: {sd_part} (size differs) → {upgrade_verb}",
                             )
 
                             url_item.update({"download": True})
@@ -1351,11 +1366,10 @@ class SeaDexArr:
                         else:
                             have_part = f"[{seadex_rg}]" + (f" ({arr_size_str})" if arr_size_str else "")
                             sd_part = f"[{seadex_rg}]" + (f" ({sd_size_str})" if sd_size_str else "") + sd_tag_str
-                            self.logger.debug(
-                                left_aligned_string(
-                                    f"Have: {have_part} | SeaDex: {sd_part} → already have it ✓",
-                                    total_length=self.log_line_length,
-                                )
+                            log_once(
+                                self.logger.debug,
+                                (url_hash, "have"),
+                                f"Have: {have_part} | SeaDex: {sd_part} → already have it ✓",
                             )
 
                 else:
@@ -1433,12 +1447,11 @@ class SeaDexArr:
 
                                     if sonarr_rg not in all_seadex_rg:
                                         display_rg = sonarr_rg if sonarr_rg else "unknown"
-                                        self.logger.debug(
-                                            left_aligned_string(
-                                                f"Have: [{display_rg}] {season_ep_str} | "
-                                                f"SeaDex: [{seadex_rg}] {season_ep_str} → {self._action_word()}",
-                                                total_length=self.log_line_length,
-                                            )
+                                        log_once(
+                                            self.logger.debug,
+                                            (url_hash, "ep", season_ep_str),
+                                            f"Have: [{display_rg}] {season_ep_str} | "
+                                            f"SeaDex: [{seadex_rg}] {season_ep_str} → {self._action_word()}",
                                         )
 
                                         # Accumulate for summary
@@ -1452,27 +1465,24 @@ class SeaDexArr:
 
                                 else:
 
-                                    self.logger.debug(
-                                        left_aligned_string(
-                                            f"Found SeaDex match to {arr.capitalize()} "
-                                            f"for {season_ep_str}.",
-                                            total_length=self.log_line_length,
-                                        )
+                                    log_once(
+                                        self.logger.debug,
+                                        (url_hash, "found", season_ep_str),
+                                        f"Found SeaDex match to {arr.capitalize()} "
+                                        f"for {season_ep_str}.",
                                     )
                                     if not size_match:
-                                        self.logger.debug(
-                                            left_aligned_string(
-                                                f"-> Sizes are different: "
-                                                f"{sonarr_ep_size} (Sonarr), {seadex_ep_size} (SeaDex)",
-                                                total_length=self.log_line_length,
-                                            )
+                                        log_once(
+                                            self.logger.debug,
+                                            (url_hash, "found_size", season_ep_str),
+                                            f"-> Sizes are different: "
+                                            f"{sonarr_ep_size} (Sonarr), {seadex_ep_size} (SeaDex)",
                                         )
                                     else:
-                                        self.logger.debug(
-                                            left_aligned_string(
-                                                f"-> Sizes match: {sonarr_ep_size}",
-                                                total_length=self.log_line_length,
-                                            )
+                                        log_once(
+                                            self.logger.debug,
+                                            (url_hash, "found_size", season_ep_str),
+                                            f"-> Sizes match: {sonarr_ep_size}",
                                         )
 
                                     rg_matches[seadex_idx] = True
@@ -1494,12 +1504,11 @@ class SeaDexArr:
                             + (f" ({sd_total_str} total)" if sd_total_str else "")
                             + sd_tag_str
                         )
-                        upgrade_log(
-                            left_aligned_string(
-                                f"Have: [{have_rgs_str}] ({ep_rg_mismatch_count} eps) | "
-                                f"SeaDex: {sd_part} → {upgrade_verb}",
-                                total_length=self.log_line_length,
-                            )
+                        log_once(
+                            upgrade_log,
+                            (url_hash, "ep_summary"),
+                            f"Have: [{have_rgs_str}] ({ep_rg_mismatch_count} eps) | "
+                            f"SeaDex: {sd_part} → {upgrade_verb}",
                         )
 
                     # If we have matched the release groups but not the file sizes, then flag that
@@ -1513,11 +1522,10 @@ class SeaDexArr:
                         arr_size_str = self._fmt_size_gb(arr_sizes)
                         have_part = f"[{seadex_rg}]" + (f" ({arr_size_str})" if arr_size_str else "")
                         sd_part = f"[{seadex_rg}]" + (f" ({sd_size_str})" if sd_size_str else "") + sd_tag_str
-                        upgrade_log(
-                            left_aligned_string(
-                                f"Have: {have_part} | SeaDex: {sd_part} (episode sizes differ) → {upgrade_verb}",
-                                total_length=self.log_line_length,
-                            )
+                        log_once(
+                            upgrade_log,
+                            (url_hash, "ep_sizes"),
+                            f"Have: {have_part} | SeaDex: {sd_part} (episode sizes differ) → {upgrade_verb}",
                         )
                         url_item.update({"download": True})
 

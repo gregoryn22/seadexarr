@@ -1184,6 +1184,45 @@ class TestFilterByReleaseGroupAltLog(unittest.TestCase):
         info_msgs = " ".join(str(c.args[0]) for c in arr.logger.info.call_args_list)
         self.assertIn("tagging", info_msgs)
 
+    def test_same_infohash_on_two_trackers_logs_once(self):
+        # The same torrent mirrored on two trackers shares an infohash; the
+        # mismatch line must appear once, but both URLs still get flagged.
+        arr = self._make_arr()
+        seadex_dict = {
+            "BestGroup": {
+                "tags": [],
+                "urls": {
+                    "https://animebytes.tv/t/1": {
+                        "hash": "h1",
+                        "size": [28_000_000_000],
+                        "episodes": [],
+                        "download": False,
+                        "tracker": "AB",
+                    },
+                    "https://nyaa.si/view/1": {
+                        "hash": "h1",
+                        "size": [28_000_000_000],
+                        "episodes": [],
+                        "download": False,
+                        "tracker": "Nyaa",
+                    },
+                },
+            }
+        }
+        arr.filter_by_release_group(
+            seadex_dict=seadex_dict,
+            arr="sonarr",
+            arr_release_dict={"AltGroup": {"size": [9_000_000_000]}},
+            ep_list=[],
+        )
+        tagging_lines = [
+            c for c in arr.logger.info.call_args_list
+            if "tagging" in str(c.args[0])
+        ]
+        self.assertEqual(len(tagging_lines), 1)
+        for url_item in seadex_dict["BestGroup"]["urls"].values():
+            self.assertTrue(url_item["download"])
+
 
 # ---------------------------------------------------------------------------
 # Notification rules: library-only changes and first-run seeding
