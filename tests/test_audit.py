@@ -598,7 +598,7 @@ class TestNotificationRendering(unittest.TestCase):
         audit = self._audit()
         r = _make_result(seadex_status="partial")
         sentence = audit._summary_sentence(r, old_state=None)
-        self.assertIn("some entries", sentence)
+        self.assertIn("no release passes your filters", sentence)
 
     # -- _item_label: name the matched part (season / movie / special) --------
 
@@ -1182,6 +1182,85 @@ class TestFilterByReleaseGroupAltLog(unittest.TestCase):
         )
         info_msgs = " ".join(str(c.args[0]) for c in arr.logger.info.call_args_list)
         self.assertIn("tagging", info_msgs)
+
+
+# ---------------------------------------------------------------------------
+# Partial status: entry exists but every release filtered out
+# ---------------------------------------------------------------------------
+
+class TestPartialStatus(unittest.TestCase):
+
+    def _make_audit(self):
+        audit = SeaDexAudit.__new__(SeaDexAudit)
+        audit.alt_is_acceptable = False
+        audit.size_filter_enabled = False
+        audit.ignore_tags = []
+        audit.trackers = ["nyaa"]
+        audit.public_only = True
+        audit.log_line_length = 80
+        audit.logger = MagicMock()
+        # Seed the AniList cache so format lookups are cache hits (no network).
+        audit.al_cache = {12345: {"data": {"Media": {"format": "TV"}}}}
+        return audit
+
+    def test_series_entry_with_all_releases_filtered_is_partial(self):
+        audit = self._make_audit()
+        mock_series = MagicMock()
+        mock_series.id = 1
+        mock_series.title = "Test Show"
+        mock_sd_entry = MagicMock()
+        mock_sd_entry.url = "https://seadex.moe/test"
+
+        with patch.object(audit, "get_seadex_entry", return_value=mock_sd_entry), \
+             patch.object(audit, "get_anilist_title", return_value="Test Show"), \
+             patch.object(audit, "get_ep_list", return_value=[]), \
+             patch.object(audit, "get_sonarr_release_dict", return_value={}), \
+             patch.object(audit, "get_seadex_dict", return_value={}):
+            out = audit._audit_al_id(mock_series, 12345, {})
+
+        self.assertEqual(out["seadex_status"], "partial")
+        self.assertFalse(out["upgrade_available"])
+
+    def test_series_no_entry_stays_none(self):
+        audit = self._make_audit()
+        mock_series = MagicMock()
+        mock_series.id = 1
+        mock_series.title = "Test Show"
+
+        with patch.object(audit, "get_seadex_entry", return_value=None):
+            out = audit._audit_al_id(mock_series, 12345, {})
+
+        self.assertEqual(out["seadex_status"], "none")
+
+    def test_movie_entry_with_all_releases_filtered_is_partial(self):
+        audit = self._make_audit()
+        audit.al_cache = {12345: {"data": {"Media": {"format": "MOVIE"}}}}
+        mock_movie = MagicMock()
+        mock_movie.id = 1
+        mock_movie.title = "Test Movie"
+        mock_sd_entry = MagicMock()
+        mock_sd_entry.url = "https://seadex.moe/test"
+
+        with patch.object(audit, "get_seadex_entry", return_value=mock_sd_entry), \
+             patch.object(audit, "get_anilist_title", return_value="Test Movie"), \
+             patch.object(audit, "get_seadex_dict", return_value={}):
+            out = audit._audit_radarr_al_id(mock_movie, 12345, {None: {"size": None}})
+
+        self.assertEqual(out["seadex_status"], "partial")
+
+    def test_item_lines_partial_head(self):
+        audit = self._make_audit()
+        entry = {
+            "seadex_status": "partial",
+            "library_rgs": [],
+            "seadex_size_bytes": 0,
+            "library_size_bytes": 0,
+            "upgrade_available": False,
+            "too_large": False,
+        }
+        head = audit._item_lines(entry)[0]
+        self.assertIn("🟡", head)
+        self.assertIn("no release passes your filters", head)
 
 
 if __name__ == "__main__":

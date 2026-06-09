@@ -680,8 +680,10 @@ class SeaDexAudit(SeaDexSonarr):
 
         if len(seadex_dict) == 0:
             # SeaDex has an entry but all torrents were filtered by the user's
-            # tracker/public_only/want_best config — no actionable release exists.
-            return out  # seadex_status stays "none"
+            # tracker/public_only/want_best config — no actionable release
+            # exists. This is the documented "partial" state.
+            out["seadex_status"] = "partial"
+            return out
 
         out["seadex_status"] = "full"
         out["seadex_rgs"] = list(seadex_dict.keys())
@@ -1090,6 +1092,8 @@ class SeaDexAudit(SeaDexSonarr):
                 head = f"💰 free win — better AND smaller, {detail}"
             else:
                 head = f"🟠 upgrade available — {detail}"
+        elif entry.get("seadex_status") == "partial":
+            head = "🟡 tracked, but no release passes your filters"
         else:
             head = f"🟢 covered — you have {lib}" if lib else "🟢 covered"
 
@@ -1173,7 +1177,7 @@ class SeaDexAudit(SeaDexSonarr):
         if result.upgrade_available:
             return "🟠", "better release available"
         if result.seadex_status == "partial":
-            return "🟡", "partially tracked"
+            return "🟡", "tracked, but filtered by your settings"
         if result.seadex_status == "full":
             return "🟢", "covered, nothing to do"
         return "⚪", "no SeaDex match"
@@ -1208,7 +1212,10 @@ class SeaDexAudit(SeaDexSonarr):
             )
 
         if result.seadex_status == "partial":
-            return "SeaDex covers some entries for this title but not all."
+            return (
+                "SeaDex tracks this title, but no release passes your filters "
+                "(trackers / public_only / want_best)."
+            )
 
         if result.seadex_status != "full":
             return "SeaDex has no tracked release for this title."
@@ -1629,6 +1636,9 @@ class SeaDexAudit(SeaDexSonarr):
 
         seadex_dict = self.get_seadex_dict(sd_entry=sd_entry)
         if not seadex_dict:
+            # Entry exists but every torrent was filtered by the user's config
+            # — the documented "partial" state.
+            out["seadex_status"] = "partial"
             return out
 
         out["seadex_status"] = "full"
@@ -1783,7 +1793,7 @@ class SeaDexAudit(SeaDexSonarr):
         if result.upgrade_available:
             return "🟠", "better release available"
         if result.seadex_status == "partial":
-            return "🟡", "partially tracked"
+            return "🟡", "tracked, but filtered by your settings"
         if result.seadex_status == "full":
             return "🟢", "covered, nothing to do"
         return "⚪", "no SeaDex match"
@@ -1827,7 +1837,10 @@ class SeaDexAudit(SeaDexSonarr):
             )
 
         if result.seadex_status == "partial":
-            return "SeaDex covers some entries for this title but not all."
+            return (
+                "SeaDex tracks this title, but no release passes your filters "
+                "(trackers / public_only / want_best)."
+            )
 
         if result.seadex_status != "full":
             return "SeaDex has no tracked release for this title."
