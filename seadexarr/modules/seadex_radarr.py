@@ -17,6 +17,7 @@ class SeaDexRadarr(SeaDexArr):
         config="config.yml",
         cache="cache.json",
         logger=None,
+        mirror=None,
     ):
         """Sync Radarr instance with SeaDex
 
@@ -27,6 +28,8 @@ class SeaDexRadarr(SeaDexArr):
                 Defaults to "cache.json".
             logger. Logging instance. Defaults to None,
                 which will create one.
+            mirror. Already-synced SeaDexMirror to reuse. Defaults to None,
+                which will build one from config.
         """
 
         SeaDexArr.__init__(
@@ -35,6 +38,7 @@ class SeaDexRadarr(SeaDexArr):
             config=config,
             cache=cache,
             logger=logger,
+            mirror=mirror,
         )
 
         # Set up Radarr

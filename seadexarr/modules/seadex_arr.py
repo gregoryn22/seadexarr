@@ -161,6 +161,7 @@ class SeaDexArr:
         config="config.yml",
         cache="cache.json",
         logger=None,
+        mirror=None,
     ):
         """Base class for SeaDexArr instances
 
@@ -173,6 +174,9 @@ class SeaDexArr:
                 Defaults to "cache.json".
             logger. Logging instance. Defaults to None,
                 which will create one.
+            mirror. Already-synced SeaDexMirror to reuse. Defaults to None,
+                which will build (and sync) one from config. Pass this when
+                composing instances so the catalogue isn't pulled twice.
         """
 
         # If we don't have a config file, copy the sample to the current
@@ -337,8 +341,12 @@ class SeaDexArr:
         # title every run, we keep a local SQLite copy of the (small) SeaDex
         # catalogue and refresh it incrementally. get_seadex_entry then reads
         # from here. Set seadex_mirror: false to fall back to live API queries.
+        # A mirror passed in by a parent instance is reused as-is (already
+        # synced) instead of building and syncing a second copy.
         self.mirror = None
-        if self.config.get("seadex_mirror", True):
+        if mirror is not None:
+            self.mirror = mirror
+        elif self.config.get("seadex_mirror", True):
             mirror_db = self.config.get("seadex_mirror_db", None)
             if not mirror_db:
                 mirror_db = os.path.join(

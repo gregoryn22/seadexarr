@@ -239,9 +239,15 @@ class SeaDexSonarr(SeaDexArr):
         radarr_api_key = self.config.get("radarr_api_key", None)
 
         if radarr_url is not None and radarr_api_key is not None:
+            # Pass our cache path and already-synced mirror through. Without
+            # these the sub-instance defaulted to cache.json in the cwd, putting
+            # its mirror DB on an ephemeral path — which re-bootstrapped the
+            # entire SeaDex catalogue from the API on every single run.
             self.radarr = SeaDexRadarr(
                 config=config,
+                cache=cache,
                 logger=logger,
+                mirror=self.mirror,
             )
             self.all_radarr_movies = self.radarr.get_all_radarr_movies()
 
