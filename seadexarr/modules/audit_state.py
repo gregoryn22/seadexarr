@@ -77,6 +77,29 @@ def state_changed(old: Optional[SeriesAuditState], new: SeriesAuditState) -> boo
     )
 
 
+def _library_only_change(old, new) -> bool:
+    """True when the only difference from the old state is the library's own
+    release groups (e.g. an airing series imported an episode from a new
+    group). SeaDex status, SeaDex groups and every actionable flag are equal."""
+    if old is None:
+        return False
+    if set(old.library_rgs) == set(new.library_rgs):
+        return False
+    same = (
+        old.seadex_status == new.seadex_status
+        and set(old.seadex_rgs) == set(new.seadex_rgs)
+        and old.upgrade_available == new.upgrade_available
+        and old.too_large == new.too_large
+    )
+    if isinstance(new, SeriesAuditState):
+        return (
+            same
+            and old.missing_specials == new.missing_specials
+            and old.missing_season == new.missing_season
+        )
+    return same and old.hardlink_mismatch == new.hardlink_mismatch
+
+
 def rg_diff(
     old: Optional[SeriesAuditState], new: SeriesAuditState
 ) -> tuple[list[str], list[str]]:
@@ -258,6 +281,12 @@ class AuditState:
     # Public API (same surface as the old JSON-backed class)
     # ------------------------------------------------------------------
 
+    def series_count(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM series").fetchone()[0]
+
+    def movies_count(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM movies").fetchone()[0]
+
     def get_series(self, sonarr_id: int) -> Optional[SeriesAuditState]:
         row = self._conn.execute(
             "SELECT * FROM series WHERE sonarr_id = ?", (sonarr_id,)
@@ -302,6 +331,12 @@ class AuditState:
 
         if new_state.seadex_status == "full" and was_none:
             return discord_cfg.get("notify_on_new_seadex_match", True)
+
+        # Library files changed but nothing about the SeaDex side or the
+        # actionable flags did — e.g. an airing series imported a new episode.
+        # Quiet by default; opt in with notify_on_library_change.
+        if _library_only_change(old, new_state):
+            return discord_cfg.get("notify_on_library_change", False)
 
         # State changed but no specific rule matched (e.g. partial→full when already seen)
         return discord_cfg.get("notify_on_state_change", True)
@@ -418,6 +453,9 @@ class AuditState:
 
         if new_state.seadex_status == "full" and was_none:
             return discord_cfg.get("notify_on_new_seadex_match", True)
+
+        if _library_only_change(old, new_state):
+            return discord_cfg.get("notify_on_library_change", False)
 
         return discord_cfg.get("notify_on_state_change", True)
 

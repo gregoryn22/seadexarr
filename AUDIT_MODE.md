@@ -79,7 +79,9 @@ audit:
     notify_on_missing_specials: true
     notify_on_missing_season: true
     notify_on_state_change: true   # any other state change (e.g. SeaDex release list updated)
+    notify_on_library_change: false  # your own files changed but nothing actionable did
     notify_on_no_change: false
+    first_run_actionable_only: true  # first run seeds state quietly; only actionable items post
     batch_notifications: true    # group a few series per Discord message
 
   state:

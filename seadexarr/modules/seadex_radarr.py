@@ -260,6 +260,7 @@ class SeaDexRadarr(SeaDexArr):
                                     seadex_url=sd_url,
                                     fields=fields,
                                     thumb_url=anilist_thumb,
+                                    logger=self.logger,
                                 )
 
                             if self.max_torrents_to_add is not None:

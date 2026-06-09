@@ -12,9 +12,8 @@ from dataclasses import dataclass, field
 from itertools import groupby
 from typing import Optional
 
-from discordwebhook import Discord
-
 from .anilist import get_anilist_format, get_anilist_thumb
+from .discord import POST_SLEEP, discord_post_with_retry
 from .audit_state import (
     AuditState, SeriesAuditState, MovieAuditState,
     rg_diff, state_changed, movie_state_changed,
@@ -215,6 +214,13 @@ class SeaDexAudit(SeaDexSonarr):
         all_series = self.get_all_sonarr_series()
         n_total = len(all_series)
 
+        # Empty state table = first ever audit run. Captured before anything is
+        # persisted so the notification filter below can tell "everything looks
+        # new because the state is new" apart from genuinely new matches.
+        first_run_series = (
+            self.audit_state is not None and self.audit_state.series_count() == 0
+        )
+
         self.log_arr_start(arr="sonarr", n_items=n_total)
 
         stats: dict[str, int] = {
@@ -302,6 +308,33 @@ class SeaDexAudit(SeaDexSonarr):
             # rate-limit headers (see anilist.get_query). Series that hit the
             # cache or have no SeaDex entry never call out, so they never wait.
 
+        to_notify = [r for r in results if r.notify and r.seadex_status != "none"]
+
+        # First ever run: the state table is empty, so every matched series
+        # counts as "new" and the default rules would notify all of them —
+        # hundreds of green "covered, nothing to do" embeds. Seed the state
+        # quietly and only post the actionable ones, unless the user opts out.
+        if (
+            first_run_series
+            and to_notify
+            and self.discord_cfg.get("first_run_actionable_only", True)
+        ):
+            suppressed = [r for r in to_notify if not self._series_actionable(r)]
+            if suppressed:
+                self.logger.info(
+                    centred_string(
+                        f"First audit run — seeding state; skipping "
+                        f"{len(suppressed)} covered-only notification(s) "
+                        f"(audit.discord.first_run_actionable_only)",
+                        total_length=self.log_line_length,
+                    )
+                )
+                # Clear notify so the pending stamp below doesn't replay these
+                # on the next run.
+                for r in suppressed:
+                    r.notify = False
+                to_notify = [r for r in to_notify if r.notify]
+
         # Persist state before notifications so a crash during Discord doesn't
         # leave all audited series looking new on the next run. Series that
         # should notify are stamped notify_pending so a failed/never-attempted
@@ -325,7 +358,6 @@ class SeaDexAudit(SeaDexSonarr):
                 self.audit_state.update_series(self._to_state(r), notified=True)
             self.audit_state.save()
 
-        to_notify = [r for r in results if r.notify and r.seadex_status != "none"]
         if to_notify and (self.audit_notify_discord or notify_only) and self.discord_url:
             if self.discord_cfg.get("batch_notifications", True):
                 self._send_batch_discord(to_notify, old_states, on_sent=_mark_notified)
@@ -356,6 +388,10 @@ class SeaDexAudit(SeaDexSonarr):
             all_movies = self.all_radarr_movies
             n_movies = len(all_movies)
             radarr_stats["total"] = n_movies
+
+            first_run_movies = (
+                self.audit_state is not None and self.audit_state.movies_count() == 0
+            )
 
             self.log_arr_start(arr="radarr", n_items=n_movies)
 
@@ -436,6 +472,33 @@ class SeaDexAudit(SeaDexSonarr):
                 elif dry_run and do_tags:
                     self._log_dry_run_movie_tags(movie_result)
 
+            movies_to_notify = [
+                mr for mr in movie_results
+                if mr.notify and (mr.seadex_status != "none" or mr.hardlink_mismatch)
+            ]
+
+            # First-run seeding, same as the series pass above.
+            if (
+                first_run_movies
+                and movies_to_notify
+                and self.discord_cfg.get("first_run_actionable_only", True)
+            ):
+                suppressed = [
+                    mr for mr in movies_to_notify if not self._movie_actionable(mr)
+                ]
+                if suppressed:
+                    self.logger.info(
+                        centred_string(
+                            f"First audit run — seeding state; skipping "
+                            f"{len(suppressed)} covered-only notification(s) "
+                            f"(audit.discord.first_run_actionable_only)",
+                            total_length=self.log_line_length,
+                        )
+                    )
+                    for mr in suppressed:
+                        mr.notify = False
+                    movies_to_notify = [mr for mr in movies_to_notify if mr.notify]
+
             # Persist movie state before notifications; stamp notify_pending so
             # failed posts are retried next run.
             if self.audit_state is not None and not dry_run:
@@ -454,10 +517,6 @@ class SeaDexAudit(SeaDexSonarr):
                     self.audit_state.update_movie(self._to_movie_state(mr), notified=True)
                 self.audit_state.save()
 
-            movies_to_notify = [
-                mr for mr in movie_results
-                if mr.notify and (mr.seadex_status != "none" or mr.hardlink_mismatch)
-            ]
             if movies_to_notify and (self.audit_notify_discord or notify_only) and self.discord_url:
                 if self.discord_cfg.get("batch_notifications", True):
                     self._send_batch_movie_discord(
@@ -480,6 +539,24 @@ class SeaDexAudit(SeaDexSonarr):
     # ------------------------------------------------------------------
     # Per-series audit
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _series_actionable(result: AuditResult) -> bool:
+        """True when the result asks the user to do something (vs. 'covered')."""
+        return bool(
+            result.upgrade_available
+            or result.too_large
+            or result.missing_specials
+            or result.missing_season
+        )
+
+    @staticmethod
+    def _movie_actionable(result: MovieAuditResult) -> bool:
+        return bool(
+            result.upgrade_available
+            or result.too_large
+            or result.hardlink_mismatch
+        )
 
     def _series_is_ignored(self, sonarr_series) -> bool:
         """True if the series has the seadex-ignored tag in Sonarr."""
@@ -1319,26 +1396,9 @@ class SeaDexAudit(SeaDexSonarr):
 
     def _discord_post_with_retry(self, embeds: list, label: str = ""):
         """Post embeds to Discord, retrying up to 3 times on 429 rate-limit responses."""
-        discord = Discord(url=self.discord_url)
-        for attempt in range(3):
-            response = discord.post(embeds=embeds)
-            if response is None or response.ok:
-                return response
-            if response.status_code == 429:
-                try:
-                    retry_after = float(response.json().get("retry_after", 1.0))
-                except Exception:
-                    retry_after = 1.0
-                sleep_for = retry_after + 0.2
-                self.logger.warning(
-                    "Discord rate limited%s — sleeping %.1fs (attempt %d/3)",
-                    f" for {label}" if label else "", sleep_for, attempt + 1,
-                )
-                time.sleep(sleep_for)
-                discord = Discord(url=self.discord_url)
-                continue
-            return response
-        return response
+        return discord_post_with_retry(
+            self.discord_url, embeds, logger=self.logger, label=label
+        )
 
     def _send_single_discord(
         self,
@@ -1356,11 +1416,11 @@ class SeaDexAudit(SeaDexSonarr):
                 "Discord post failed for %s (%s): %s",
                 result.sonarr_title, response.status_code, response.text[:200],
             )
-            time.sleep(1)
+            time.sleep(POST_SLEEP)
             return
         if on_sent is not None:
             on_sent([result])
-        time.sleep(1)
+        time.sleep(POST_SLEEP)
 
     def _send_batch_discord(
         self,
@@ -1385,7 +1445,7 @@ class SeaDexAudit(SeaDexSonarr):
                         "Discord batch post failed (%s) — retrying %d embeds individually",
                         response.status_code, len(batch),
                     )
-                    time.sleep(1)
+                    time.sleep(POST_SLEEP)
                     for r, embed in zip(batch, embeds):
                         r_resp = self._discord_post_with_retry([embed], label=r.sonarr_title)
                         if r_resp is not None and not r_resp.ok:
@@ -1393,23 +1453,23 @@ class SeaDexAudit(SeaDexSonarr):
                                 "Discord post failed for %s (%s): %s",
                                 r.sonarr_title, r_resp.status_code, r_resp.text[:200],
                             )
-                            time.sleep(1)
+                            time.sleep(POST_SLEEP)
                             continue
                         if on_sent is not None:
                             on_sent([r])
-                        time.sleep(1)
+                        time.sleep(POST_SLEEP)
                 else:
                     self.logger.warning(
                         "Discord post failed for %s (%s): %s",
                         batch[0].sonarr_title, response.status_code, response.text[:200],
                     )
-                    time.sleep(1)
+                    time.sleep(POST_SLEEP)
                 continue
             # Stamp this batch as notified only after its post succeeds, so a
             # crash on a later batch never replays the batches already sent.
             if on_sent is not None:
                 on_sent(batch)
-            time.sleep(1)
+            time.sleep(POST_SLEEP)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1992,11 +2052,11 @@ class SeaDexAudit(SeaDexSonarr):
                 "Discord post failed for %s (%s): %s",
                 result.radarr_title, response.status_code, response.text[:200],
             )
-            time.sleep(1)
+            time.sleep(POST_SLEEP)
             return
         if on_sent is not None:
             on_sent([result])
-        time.sleep(1)
+        time.sleep(POST_SLEEP)
 
     def _send_batch_movie_discord(
         self,
@@ -2019,7 +2079,7 @@ class SeaDexAudit(SeaDexSonarr):
                         "Discord batch post failed (%s) — retrying %d embeds individually",
                         response.status_code, len(batch),
                     )
-                    time.sleep(1)
+                    time.sleep(POST_SLEEP)
                     for mr, embed in zip(batch, embeds):
                         r_resp = self._discord_post_with_retry([embed], label=mr.radarr_title)
                         if r_resp is not None and not r_resp.ok:
@@ -2027,21 +2087,21 @@ class SeaDexAudit(SeaDexSonarr):
                                 "Discord post failed for %s (%s): %s",
                                 mr.radarr_title, r_resp.status_code, r_resp.text[:200],
                             )
-                            time.sleep(1)
+                            time.sleep(POST_SLEEP)
                             continue
                         if on_sent is not None:
                             on_sent([mr])
-                        time.sleep(1)
+                        time.sleep(POST_SLEEP)
                 else:
                     self.logger.warning(
                         "Discord post failed for %s (%s): %s",
                         batch[0].radarr_title, response.status_code, response.text[:200],
                     )
-                    time.sleep(1)
+                    time.sleep(POST_SLEEP)
                 continue
             if on_sent is not None:
                 on_sent(batch)
-            time.sleep(1)
+            time.sleep(POST_SLEEP)
 
     def _log_movie_result(self, result: MovieAuditResult):
         status_str = result.seadex_status

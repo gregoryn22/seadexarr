@@ -851,6 +851,7 @@ class TestIncrementalNotify(unittest.TestCase):
         audit.tag_upgrade = "seadex-upgrade-available"
         audit.tag_too_large = "seadex-too-large"
         audit.al_cache = {}
+        audit.logger = MagicMock()
         return audit
 
     def _results(self, n):
@@ -858,19 +859,19 @@ class TestIncrementalNotify(unittest.TestCase):
 
     @patch("seadexarr.modules.audit.time.sleep", return_value=None)
     @patch("seadexarr.modules.audit.get_anilist_thumb", return_value=(None, {}))
-    @patch("seadexarr.modules.audit.Discord")
+    @patch("seadexarr.modules.discord.Discord")
     def test_on_sent_fires_once_per_batch(self, _disc, _thumb, _sleep):
         audit = self._audit()
         sent_batches = []
         audit._send_batch_discord(
             self._results(23), old_states={}, on_sent=sent_batches.append
         )
-        # 23 results -> batches of 10, 10, 3
-        self.assertEqual([len(b) for b in sent_batches], [10, 10, 3])
+        # 23 results -> batches of 3 (conservative size, see BATCH_SIZE)
+        self.assertEqual([len(b) for b in sent_batches], [3, 3, 3, 3, 3, 3, 3, 2])
 
     @patch("seadexarr.modules.audit.time.sleep", return_value=None)
     @patch("seadexarr.modules.audit.get_anilist_thumb", return_value=(None, {}))
-    @patch("seadexarr.modules.audit.Discord")
+    @patch("seadexarr.modules.discord.Discord")
     def test_crash_mid_notify_leaves_later_batches_unstamped(self, disc, _thumb, _sleep):
         audit = self._audit()
         # First post succeeds, second raises -> only the first batch is stamped.
@@ -881,11 +882,11 @@ class TestIncrementalNotify(unittest.TestCase):
                 self._results(15), old_states={}, on_sent=stamped.append
             )
         self.assertEqual(len(stamped), 1)
-        self.assertEqual(len(stamped[0]), 10)  # only the first batch
+        self.assertEqual(len(stamped[0]), 3)  # only the first batch
 
     @patch("seadexarr.modules.audit.time.sleep", return_value=None)
     @patch("seadexarr.modules.audit.get_anilist_thumb", return_value=(None, {}))
-    @patch("seadexarr.modules.audit.Discord")
+    @patch("seadexarr.modules.discord.Discord")
     def test_single_send_stamps_after_post(self, _disc, _thumb, _sleep):
         audit = self._audit()
         stamped = []
@@ -1182,6 +1183,83 @@ class TestFilterByReleaseGroupAltLog(unittest.TestCase):
         )
         info_msgs = " ".join(str(c.args[0]) for c in arr.logger.info.call_args_list)
         self.assertIn("tagging", info_msgs)
+
+
+# ---------------------------------------------------------------------------
+# Notification rules: library-only changes and first-run seeding
+# ---------------------------------------------------------------------------
+
+class TestLibraryOnlyChange(unittest.TestCase):
+
+    def _with_state(self, fn):
+        path = _tmp_db()
+        state = AuditState(path)
+        try:
+            fn(state)
+        finally:
+            state.close()
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_library_rg_change_quiet_by_default(self):
+        def check(state):
+            old = _make_state(seadex_status="full", seadex_rgs=["uba"],
+                              library_rgs=["GroupA"])
+            state.update_series(old)
+            new = _make_state(seadex_status="full", seadex_rgs=["uba"],
+                              library_rgs=["GroupA", "GroupB"])
+            self.assertFalse(state.should_notify(new, {}))
+        self._with_state(check)
+
+    def test_library_rg_change_notifies_when_opted_in(self):
+        def check(state):
+            old = _make_state(seadex_status="full", seadex_rgs=["uba"],
+                              library_rgs=["GroupA"])
+            state.update_series(old)
+            new = _make_state(seadex_status="full", seadex_rgs=["uba"],
+                              library_rgs=["GroupA", "GroupB"])
+            cfg = {"notify_on_library_change": True}
+            self.assertTrue(state.should_notify(new, cfg))
+        self._with_state(check)
+
+    def test_seadex_rg_change_still_notifies(self):
+        def check(state):
+            old = _make_state(seadex_status="full", seadex_rgs=["uba"],
+                              library_rgs=["GroupA"])
+            state.update_series(old)
+            new = _make_state(seadex_status="full", seadex_rgs=["uba", "Netaro"],
+                              library_rgs=["GroupA", "GroupB"])
+            # Not a library-only change — falls to notify_on_state_change.
+            self.assertTrue(state.should_notify(new, {}))
+        self._with_state(check)
+
+
+class TestFirstRunActionable(unittest.TestCase):
+
+    def test_series_actionable(self):
+        self.assertFalse(
+            SeaDexAudit._series_actionable(_make_result(seadex_status="full"))
+        )
+        self.assertTrue(
+            SeaDexAudit._series_actionable(
+                _make_result(seadex_status="full", upgrade_available=True)
+            )
+        )
+        self.assertTrue(
+            SeaDexAudit._series_actionable(
+                _make_result(seadex_status="full", missing_season=True)
+            )
+        )
+
+    def test_movie_actionable(self):
+        from seadexarr.modules.audit import MovieAuditResult
+        covered = MovieAuditResult(
+            radarr_id=1, tmdb_id=1, radarr_title="M", anilist_title="M",
+            al_id=1, sd_url=None, seadex_status="full",
+        )
+        self.assertFalse(SeaDexAudit._movie_actionable(covered))
+        covered.hardlink_mismatch = True
+        self.assertTrue(SeaDexAudit._movie_actionable(covered))
 
 
 # ---------------------------------------------------------------------------
