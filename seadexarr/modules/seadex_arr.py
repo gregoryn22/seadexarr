@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import re
 import shutil
 from datetime import datetime
 from hashlib import md5
@@ -99,6 +100,17 @@ UPDATED_AT_STR_FORMAT = "%Y-%m-%d %H:%M:%S"
 # Timeout (s) for HTTP calls to local Arr instances and external mapping
 # downloads, so one hung socket can't stall a whole run.
 REQUEST_TIMEOUT = 30
+
+
+def normalise_rg(rg):
+    """Normalise a release-group name for comparison.
+
+    Sonarr strips punctuation from parsed release groups ("-ZR-" becomes
+    "ZR"), so exact string comparison against SeaDex's name flags releases
+    the library already holds. Compare lowercase alphanumerics only; always
+    display the original names.
+    """
+    return re.sub(r"[^a-z0-9]", "", str(rg).lower()) if rg else ""
 
 
 def get_all_seadex_rgs_per_episode(
@@ -1251,22 +1263,19 @@ class SeaDexArr:
                 )
             )
 
-        # Get a simple list of the release groups
+        # Get a simple list of the release groups. Comparisons use normalised
+        # names ("-ZR-" and "ZR" are the same group); display keeps originals.
         arr_release_groups = list(arr_release_dict.keys())
+        norm_arr_rgs = {
+            normalise_rg(rg): rg for rg in arr_release_groups if normalise_rg(rg)
+        }
+        norm_seadex_rgs = {normalise_rg(rg) for rg in seadex_dict}
 
         torrent_hashes = []
 
         # And also just check if any release group matches
         # any Arr release tag
-        overlapping_results = False
-        intersect = list(
-            filter(
-                lambda x: x in list(seadex_dict.keys()),
-                arr_release_groups,
-            )
-        )
-        if len(intersect) > 0:
-            overlapping_results = True
+        overlapping_results = bool(set(norm_arr_rgs) & norm_seadex_rgs)
 
         # If we have overlaps, get a note of them here
         all_seadex_rgs_per_episode = get_all_seadex_rgs_per_episode(
@@ -1306,7 +1315,8 @@ class SeaDexArr:
                 # upstream anime-lists repo (https://github.com/Anime-Lists/anime-lists)
                 # or by adding an override in anibridge mappings.
                 if len(seadex_episodes) == 0:
-                    if seadex_rg not in arr_release_groups and not overlapping_results:
+                    arr_rg_match = norm_arr_rgs.get(normalise_rg(seadex_rg))
+                    if arr_rg_match is None and not overlapping_results:
                         have_str = ", ".join(arr_release_groups) if arr_release_groups else "nothing"
                         have_sizes = [
                             s
@@ -1329,11 +1339,11 @@ class SeaDexArr:
                         torrent_hashes.append(url_hash)
 
                     # Else, if we match then double-check against the size
-                    if seadex_rg in arr_release_groups:
+                    if arr_rg_match is not None:
 
                         # Be a blunt hammer and just check intersections
                         seadex_file_sizes = url_item.get("size", [])
-                        arr_file_sizes = arr_release_dict[seadex_rg].get("size", [])
+                        arr_file_sizes = arr_release_dict[arr_rg_match].get("size", [])
 
                         if not isinstance(arr_file_sizes, list):
                             arr_file_sizes = [arr_file_sizes]
@@ -1433,19 +1443,26 @@ class SeaDexArr:
 
                                 # If not, flag as should be downloaded if it's not already
                                 # in some overlapping release
+                                norm_sonarr_rg = normalise_rg(sonarr_rg)
                                 if (
-                                    sonarr_rg != seadex_rg
-                                    and sonarr_rg
-                                    not in all_seadex_rgs_per_episode["all"]
+                                    norm_sonarr_rg != normalise_rg(seadex_rg)
+                                    and norm_sonarr_rg
+                                    not in {
+                                        normalise_rg(x)
+                                        for x in all_seadex_rgs_per_episode["all"]
+                                    }
                                 ):
 
                                     # This check here is to make sure we don't duplicate
                                     # if there's overlap
-                                    all_seadex_rg = all_seadex_rgs_per_episode.get(
-                                        season_ep_str, []
-                                    )
+                                    all_seadex_rg = {
+                                        normalise_rg(x)
+                                        for x in all_seadex_rgs_per_episode.get(
+                                            season_ep_str, []
+                                        )
+                                    }
 
-                                    if sonarr_rg not in all_seadex_rg:
+                                    if norm_sonarr_rg not in all_seadex_rg:
                                         display_rg = sonarr_rg if sonarr_rg else "unknown"
                                         log_once(
                                             self.logger.debug,

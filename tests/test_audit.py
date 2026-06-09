@@ -1383,6 +1383,92 @@ class TestNotifyPending(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Download size: tracker mirrors and flagged alternatives must not be summed
+# ---------------------------------------------------------------------------
+
+class TestDownloadSize(unittest.TestCase):
+    """Kamisama Kiss regression: the same release on AB and Nyaa (different
+    infohashes, same files) plus a flagged alt summed to a nonsense 149.7 GB
+    'recommended release' size."""
+
+    GB = 1024 ** 3
+
+    def _audit(self):
+        return SeaDexAudit.__new__(SeaDexAudit)
+
+    def _url(self, hash_, files, sizes, download=True):
+        return {
+            "hash": hash_,
+            "files": files,
+            "size": sizes,
+            "episodes": [],
+            "download": download,
+        }
+
+    def test_same_infohash_counted_once(self):
+        audit = self._audit()
+        files = ["ep01.mkv"]
+        sizes = [10 * self.GB]
+        d = {"ZR": {"urls": {
+            "u1": self._url("h1", files, sizes),
+            "u2": self._url("h1", files, sizes),
+        }}}
+        self.assertEqual(audit._sum_download_size(d), 10 * self.GB)
+
+    def test_tracker_mirror_with_different_hash_counted_once(self):
+        # AB and Nyaa copies of the same release: different infohash, same
+        # file list — must not double-count.
+        audit = self._audit()
+        files = ["ep01.mkv", "ep02.mkv"]
+        sizes = [10 * self.GB, 10 * self.GB]
+        d = {"-ZR-": {"urls": {
+            "https://animebytes.tv/t/1": self._url("h_ab", files, sizes),
+            "https://nyaa.si/view/1": self._url("h_nyaa", files, sizes),
+        }}}
+        self.assertEqual(audit._sum_download_size(d), 20 * self.GB)
+
+    def test_distinct_parts_still_summed(self):
+        # Different file lists in the same group are parts (e.g. S1 + S2
+        # packs), not mirrors — keep summing those.
+        audit = self._audit()
+        d = {"ZR": {"urls": {
+            "u1": self._url("h1", ["s1.mkv"], [10 * self.GB]),
+            "u2": self._url("h2", ["s2.mkv"], [15 * self.GB]),
+        }}}
+        self.assertEqual(audit._sum_download_size(d), 25 * self.GB)
+
+    def test_best_tier_excludes_flagged_alt(self):
+        # Best (-ZR-) and alt (AC) both flagged: the recommendation is the
+        # best release, so the alt must not inflate the size.
+        audit = self._audit()
+        d = {
+            "-ZR-": {"urls": {
+                "u1": self._url("h1", ["zr.mkv"], [56 * self.GB]),
+            }},
+            "AC": {"urls": {
+                "u2": self._url("h2", ["ac.mkv"], [21 * self.GB]),
+            }},
+        }
+        self.assertEqual(
+            audit._sum_download_size(d, best_rgs={"-ZR-"}), 56 * self.GB
+        )
+
+    def test_alt_counted_when_no_best_flagged(self):
+        audit = self._audit()
+        d = {
+            "-ZR-": {"urls": {
+                "u1": self._url("h1", ["zr.mkv"], [56 * self.GB], download=False),
+            }},
+            "AC": {"urls": {
+                "u2": self._url("h2", ["ac.mkv"], [21 * self.GB]),
+            }},
+        }
+        self.assertEqual(
+            audit._sum_download_size(d, best_rgs={"-ZR-"}), 21 * self.GB
+        )
+
+
+# ---------------------------------------------------------------------------
 # Radarr release dict: multiple movie files must not abort the movie
 # ---------------------------------------------------------------------------
 

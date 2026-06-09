@@ -399,5 +399,113 @@ class TestGetOverlappingResults(unittest.TestCase):
         self.assertTrue(get_overlapping_results(d))
 
 
+class TestRgNormalisation(unittest.TestCase):
+    """Sonarr strips punctuation from release groups ("-ZR-" parses as "ZR"),
+    so comparisons must normalise — Kamisama Kiss regression."""
+
+    def test_normalise_rg(self):
+        from seadexarr.modules.seadex_arr import normalise_rg
+        self.assertEqual(normalise_rg("-ZR-"), "zr")
+        self.assertEqual(normalise_rg("ZR"), "zr")
+        self.assertEqual(normalise_rg("Anime-Koi & MTBB"), "animekoimtbb")
+        self.assertEqual(normalise_rg(None), "")
+        self.assertEqual(normalise_rg(""), "")
+
+    def _make_arr(self):
+        from seadexarr.modules.seadex_arr import SeaDexArr
+        arr = SeaDexArr.__new__(SeaDexArr)
+        arr.audit_mode = True
+        arr.use_torrent_hash_to_filter = False
+        arr.log_line_length = 80
+        arr.logger = MagicMock()
+        return arr
+
+    def test_owned_release_with_punctuated_seadex_name_not_flagged(self):
+        # Library has "ZR" (Sonarr-normalised); SeaDex calls it "-ZR-".
+        # Episode-by-episode comparison must treat them as the same group.
+        arr = self._make_arr()
+        seadex_dict = {
+            "-ZR-": {
+                "tags": [],
+                "urls": {
+                    "https://nyaa.si/view/1": {
+                        "hash": "h1",
+                        "size": [5_000_000_000],
+                        "episodes": [
+                            {"season": 2, "episode": 1, "size": 5_000_000_000},
+                        ],
+                        "download": False,
+                    },
+                },
+            },
+        }
+        ep_list = [
+            {
+                "seasonNumber": 2,
+                "episodeNumber": 1,
+                "episodeFileId": 1,
+                "episodeFile": {"releaseGroup": "ZR", "size": 5_000_000_000},
+            },
+        ]
+        arr.filter_by_release_group(
+            seadex_dict=seadex_dict,
+            arr="sonarr",
+            arr_release_dict={"ZR": {"size": [5_000_000_000]}},
+            ep_list=ep_list,
+        )
+        url_item = seadex_dict["-ZR-"]["urls"]["https://nyaa.si/view/1"]
+        self.assertFalse(url_item["download"])
+
+    def test_blunt_branch_matches_punctuated_name(self):
+        # No parsed episodes: the blunt release-group/size comparison must
+        # also match "-ZR-" against a library "ZR" with the same sizes.
+        arr = self._make_arr()
+        seadex_dict = {
+            "-ZR-": {
+                "tags": [],
+                "urls": {
+                    "https://nyaa.si/view/1": {
+                        "hash": "h1",
+                        "size": [5_000_000_000],
+                        "episodes": [],
+                        "download": False,
+                    },
+                },
+            },
+        }
+        arr.filter_by_release_group(
+            seadex_dict=seadex_dict,
+            arr="sonarr",
+            arr_release_dict={"ZR": {"size": [5_000_000_000]}},
+            ep_list=[],
+        )
+        url_item = seadex_dict["-ZR-"]["urls"]["https://nyaa.si/view/1"]
+        self.assertFalse(url_item["download"])
+
+    def test_genuinely_different_group_still_flagged(self):
+        arr = self._make_arr()
+        seadex_dict = {
+            "BestGroup": {
+                "tags": [],
+                "urls": {
+                    "https://nyaa.si/view/1": {
+                        "hash": "h1",
+                        "size": [5_000_000_000],
+                        "episodes": [],
+                        "download": False,
+                    },
+                },
+            },
+        }
+        arr.filter_by_release_group(
+            seadex_dict=seadex_dict,
+            arr="sonarr",
+            arr_release_dict={"ZR": {"size": [9_000_000_000]}},
+            ep_list=[],
+        )
+        url_item = seadex_dict["BestGroup"]["urls"]["https://nyaa.si/view/1"]
+        self.assertTrue(url_item["download"])
+
+
 if __name__ == "__main__":
     unittest.main()

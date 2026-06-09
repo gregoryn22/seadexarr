@@ -14,6 +14,7 @@ from typing import Optional
 
 from .anilist import get_anilist_format, get_anilist_thumb
 from .discord import POST_SLEEP, discord_post_with_retry
+from .seadex_arr import normalise_rg
 from .audit_state import (
     AuditState, SeriesAuditState, MovieAuditState,
     rg_diff, state_changed, movie_state_changed,
@@ -785,7 +786,7 @@ class SeaDexAudit(SeaDexSonarr):
         alt_rg, alt_size = self._smallest_alt_release(sd_entry, alt_rgs)
         out["alt_release_rg"] = alt_rg
         out["alt_release_size_bytes"] = alt_size
-        owned_sd_rgs = set(out["library_rgs"]) & (best_rgs | alt_rgs)
+        owned_sd_rgs = self._owned_rgs(out["library_rgs"], best_rgs | alt_rgs)
         acceptable_alt_owned = self.alt_is_acceptable and bool(owned_sd_rgs)
 
         _, seadex_dict = self.filter_seadex_downloads(
@@ -807,7 +808,7 @@ class SeaDexAudit(SeaDexSonarr):
         # the too_large check and Discord display reflect the actual upgrade size,
         # not the sum of every release SeaDex lists.
         if out["upgrade_available"]:
-            dl_size = self._sum_download_size(seadex_dict)
+            dl_size = self._sum_download_size(seadex_dict, best_rgs=best_rgs)
             if dl_size > 0:
                 out["seadex_size_bytes"] = dl_size
 
@@ -986,12 +987,19 @@ class SeaDexAudit(SeaDexSonarr):
                 best = (total, t.release_group)
         return (best[1], best[0]) if best else (None, 0)
 
+    @staticmethod
+    def _owned_rgs(library_rgs, seadex_rgs) -> set:
+        """Library release groups that match a SeaDex group after
+        normalisation (Sonarr strips punctuation: "-ZR-" parses as "ZR")."""
+        norm_seadex = {normalise_rg(rg) for rg in seadex_rgs}
+        return {rg for rg in library_rgs if normalise_rg(rg) in norm_seadex}
+
     def _library_has_seadex_rg(self, sd_entry, library_rgs) -> bool:
         """True if the library holds any SeaDex-listed release group (best or
         alt), honoring the same tracker/public/ignore-tag filters as
         get_seadex_dict so acceptability matches what we'd actually grab."""
         best_rgs, alt_rgs = self._seadex_rg_tiers(sd_entry)
-        return bool(set(library_rgs) & (best_rgs | alt_rgs))
+        return bool(self._owned_rgs(library_rgs, best_rgs | alt_rgs))
 
     # ------------------------------------------------------------------
     # Tags
@@ -1207,8 +1215,8 @@ class SeaDexAudit(SeaDexSonarr):
             best_rgs = entry.get("seadex_best_rgs") or []
             alt_rgs = entry.get("seadex_alt_rgs") or []
             owned = set(entry.get("library_rgs") or [])
-            owned_alt = owned & set(alt_rgs)
-            owned_best = owned & set(best_rgs)
+            owned_alt = self._owned_rgs(owned, alt_rgs)
+            owned_best = self._owned_rgs(owned, best_rgs)
             if owned_alt and not owned_best and best_rgs:
                 lines.append(
                     f"↳ {', '.join(sorted(owned_alt))} is an alt release • "
@@ -1477,12 +1485,16 @@ class SeaDexAudit(SeaDexSonarr):
 
     @staticmethod
     def _iter_unique_urls(seadex_dict: dict):
-        """Yield (url_data,) for each URL, skipping duplicate infohashes.
+        """Yield url_data for each URL, skipping tracker mirrors.
 
-        The same torrent hosted on multiple trackers shares an infohash.
-        Deduplicating here prevents double-counting sizes.
+        The same release is usually listed on several trackers — sometimes as
+        the identical torrent (same infohash), sometimes re-uploaded with a
+        different infohash but the same file list. Both forms would
+        double-count sizes, so deduplicate on infohash AND on the
+        (file name, size) signature.
         """
         seen_hashes: set = set()
+        seen_signatures: set = set()
         for rg_data in seadex_dict.values():
             for url_data in (rg_data.get("urls") or {}).values():
                 h = (url_data or {}).get("hash")
@@ -1490,20 +1502,48 @@ class SeaDexAudit(SeaDexSonarr):
                     if h in seen_hashes:
                         continue
                     seen_hashes.add(h)
+                files = (url_data or {}).get("files") or []
+                sizes = (url_data or {}).get("size") or []
+                if files:
+                    signature = frozenset(zip(files, sizes))
+                    if signature in seen_signatures:
+                        continue
+                    seen_signatures.add(signature)
                 yield url_data
 
     def _sum_seadex_size(self, seadex_dict: dict) -> int:
-        """Sum all SeaDex file sizes (all releases), deduplicating by infohash."""
+        """Sum all SeaDex file sizes (all releases), skipping tracker mirrors."""
         total = 0
         for url_data in self._iter_unique_urls(seadex_dict):
             sizes = (url_data or {}).get("size", []) or []
             total += sum(s for s in sizes if s)
         return total
 
-    def _sum_download_size(self, seadex_dict: dict) -> int:
-        """Sum sizes of URLs flagged for download, deduplicating by infohash."""
+    def _sum_download_size(self, seadex_dict: dict, best_rgs=None) -> int:
+        """Size of the upgrade a user would actually perform.
+
+        Sums URLs flagged for download, skipping tracker mirrors of the same
+        release. When any best-tier group is flagged, only best-tier groups
+        are counted — the user grabs the recommendation, not the
+        recommendation plus every flagged alternative.
+        """
+        norm_best = {normalise_rg(rg) for rg in (best_rgs or set())}
+
+        def rg_dict(rgs):
+            return {rg: seadex_dict[rg] for rg in rgs}
+
+        flagged_best = [
+            rg for rg in seadex_dict
+            if normalise_rg(rg) in norm_best
+            and any(
+                (u or {}).get("download")
+                for u in (seadex_dict[rg].get("urls") or {}).values()
+            )
+        ]
+        candidates = rg_dict(flagged_best) if flagged_best else seadex_dict
+
         total = 0
-        for url_data in self._iter_unique_urls(seadex_dict):
+        for url_data in self._iter_unique_urls(candidates):
             if not (url_data or {}).get("download"):
                 continue
             sizes = (url_data or {}).get("size", []) or []
@@ -1620,8 +1660,8 @@ class SeaDexAudit(SeaDexSonarr):
                 sonarr_title, sonarr_rgs = hit
                 result.sonarr_specials_title = sonarr_title
                 result.sonarr_specials_rgs = sonarr_rgs
-                radarr_rg_set = set(result.library_rgs)
-                sonarr_rg_set = set(sonarr_rgs)
+                radarr_rg_set = {normalise_rg(rg) for rg in result.library_rgs}
+                sonarr_rg_set = {normalise_rg(rg) for rg in sonarr_rgs}
                 if radarr_rg_set and sonarr_rg_set:
                     if radarr_rg_set & sonarr_rg_set:
                         result.hardlink_candidate = True
@@ -1719,7 +1759,7 @@ class SeaDexAudit(SeaDexSonarr):
         out["alt_release_rg"] = alt_rg
         out["alt_release_size_bytes"] = alt_size
 
-        owned_sd_rgs = set(out["library_rgs"]) & (best_rgs | alt_rgs)
+        owned_sd_rgs = self._owned_rgs(out["library_rgs"], best_rgs | alt_rgs)
         acceptable_alt_owned = self.alt_is_acceptable and bool(owned_sd_rgs)
 
         # filter_by_release_group expects string keys and list-valued sizes.
@@ -1748,7 +1788,7 @@ class SeaDexAudit(SeaDexSonarr):
         out["upgrade_available"] = self.get_any_to_download(seadex_dict=seadex_dict)
 
         if out["upgrade_available"]:
-            dl_size = self._sum_download_size(seadex_dict)
+            dl_size = self._sum_download_size(seadex_dict, best_rgs=best_rgs)
             if dl_size > 0:
                 out["seadex_size_bytes"] = dl_size
 
@@ -1970,8 +2010,8 @@ class SeaDexAudit(SeaDexSonarr):
             best_rgs = rep.get("seadex_best_rgs") or []
             alt_rgs = rep.get("seadex_alt_rgs") or []
             owned = set(result.library_rgs)
-            owned_alt = owned & set(alt_rgs)
-            owned_best = owned & set(best_rgs)
+            owned_alt = self._owned_rgs(owned, alt_rgs)
+            owned_best = self._owned_rgs(owned, best_rgs)
             if owned_alt and not owned_best and best_rgs:
                 alt_lines.append(
                     f"↳ {', '.join(sorted(owned_alt))} is an alt release • "
