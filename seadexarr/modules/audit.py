@@ -1281,6 +1281,29 @@ class SeaDexAudit(SeaDexSonarr):
 
         return embed
 
+    def _discord_post_with_retry(self, embeds: list, label: str = ""):
+        """Post embeds to Discord, retrying up to 3 times on 429 rate-limit responses."""
+        discord = Discord(url=self.discord_url)
+        for attempt in range(3):
+            response = discord.post(embeds=embeds)
+            if response is None or response.ok:
+                return response
+            if response.status_code == 429:
+                try:
+                    retry_after = float(response.json().get("retry_after", 1.0))
+                except Exception:
+                    retry_after = 1.0
+                sleep_for = retry_after + 0.2
+                self.logger.warning(
+                    "Discord rate limited%s — sleeping %.1fs (attempt %d/3)",
+                    f" for {label}" if label else "", sleep_for, attempt + 1,
+                )
+                time.sleep(sleep_for)
+                discord = Discord(url=self.discord_url)
+                continue
+            return response
+        return response
+
     def _send_single_discord(
         self,
         result: AuditResult,
@@ -1289,8 +1312,9 @@ class SeaDexAudit(SeaDexSonarr):
     ):
         if not self.discord_url:
             return
-        discord = Discord(url=self.discord_url)
-        response = discord.post(embeds=[self._build_embed(result, old_state)])
+        response = self._discord_post_with_retry(
+            [self._build_embed(result, old_state)], label=result.sonarr_title
+        )
         if response is not None and not response.ok:
             self.logger.warning(
                 "Discord post failed for %s (%s): %s",
@@ -1311,14 +1335,13 @@ class SeaDexAudit(SeaDexSonarr):
         if not self.discord_url or not results:
             return
 
-        BATCH_SIZE = 10  # Discord API maximum embeds per message
+        BATCH_SIZE = 3  # conservative default; falls back to 1 on 400
         for i in range(0, len(results), BATCH_SIZE):
             batch = results[i : i + BATCH_SIZE]
             embeds = [
                 self._build_embed(r, old_states.get(r.sonarr_id)) for r in batch
             ]
-            discord = Discord(url=self.discord_url)
-            response = discord.post(embeds=embeds)
+            response = self._discord_post_with_retry(embeds)
             if response is not None and not response.ok:
                 if len(batch) > 1:
                     # Batch exceeded Discord's 6000-char limit — retry one at a time.
@@ -1328,8 +1351,7 @@ class SeaDexAudit(SeaDexSonarr):
                     )
                     time.sleep(1)
                     for r, embed in zip(batch, embeds):
-                        r_discord = Discord(url=self.discord_url)
-                        r_resp = r_discord.post(embeds=[embed])
+                        r_resp = self._discord_post_with_retry([embed], label=r.sonarr_title)
                         if r_resp is not None and not r_resp.ok:
                             self.logger.warning(
                                 "Discord post failed for %s (%s): %s",
@@ -1888,9 +1910,9 @@ class SeaDexAudit(SeaDexSonarr):
     ):
         if not self.discord_url:
             return
-        from discordwebhook import Discord
-        discord = Discord(url=self.discord_url)
-        response = discord.post(embeds=[self._build_movie_embed(result, old_state)])
+        response = self._discord_post_with_retry(
+            [self._build_movie_embed(result, old_state)], label=result.radarr_title
+        )
         if response is not None and not response.ok:
             self.logger.warning(
                 "Discord post failed for %s (%s): %s",
@@ -1910,15 +1932,13 @@ class SeaDexAudit(SeaDexSonarr):
     ):
         if not self.discord_url or not results:
             return
-        from discordwebhook import Discord
-        BATCH_SIZE = 10
+        BATCH_SIZE = 3
         for i in range(0, len(results), BATCH_SIZE):
             batch = results[i : i + BATCH_SIZE]
             embeds = [
                 self._build_movie_embed(mr, old_states.get(mr.radarr_id)) for mr in batch
             ]
-            discord = Discord(url=self.discord_url)
-            response = discord.post(embeds=embeds)
+            response = self._discord_post_with_retry(embeds)
             if response is not None and not response.ok:
                 if len(batch) > 1:
                     self.logger.warning(
@@ -1927,8 +1947,7 @@ class SeaDexAudit(SeaDexSonarr):
                     )
                     time.sleep(1)
                     for mr, embed in zip(batch, embeds):
-                        r_discord = Discord(url=self.discord_url)
-                        r_resp = r_discord.post(embeds=[embed])
+                        r_resp = self._discord_post_with_retry([embed], label=mr.radarr_title)
                         if r_resp is not None and not r_resp.ok:
                             self.logger.warning(
                                 "Discord post failed for %s (%s): %s",
