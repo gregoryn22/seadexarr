@@ -1267,7 +1267,7 @@ class SeaDexArr:
         # names ("-ZR-" and "ZR" are the same group); display keeps originals.
         arr_release_groups = list(arr_release_dict.keys())
         norm_arr_rgs = {
-            normalise_rg(rg): rg for rg in arr_release_groups if normalise_rg(rg)
+            norm: rg for rg in arr_release_groups if (norm := normalise_rg(rg))
         }
         norm_seadex_rgs = {normalise_rg(rg) for rg in seadex_dict}
 
@@ -1317,7 +1317,10 @@ class SeaDexArr:
                 if len(seadex_episodes) == 0:
                     arr_rg_match = norm_arr_rgs.get(normalise_rg(seadex_rg))
                     if arr_rg_match is None and not overlapping_results:
-                        have_str = ", ".join(arr_release_groups) if arr_release_groups else "nothing"
+                        # Radarr reports a movie with no file as a None release
+                        # group — joining that would raise TypeError.
+                        have_rgs = [rg for rg in arr_release_groups if rg]
+                        have_str = ", ".join(have_rgs) if have_rgs else "nothing"
                         have_sizes = [
                             s
                             for rg in arr_release_groups

@@ -482,6 +482,36 @@ class TestRgNormalisation(unittest.TestCase):
         url_item = seadex_dict["-ZR-"]["urls"]["https://nyaa.si/view/1"]
         self.assertFalse(url_item["download"])
 
+    def test_movie_without_file_does_not_crash(self):
+        # Radarr reports a movie with no file as {None: {"size": None}} —
+        # the "Have:" log line used to crash joining a [None] group list.
+        arr = self._make_arr()
+        seadex_dict = {
+            "BestGroup": {
+                "tags": [],
+                "urls": {
+                    "https://nyaa.si/view/1": {
+                        "hash": "h1",
+                        "size": [5_000_000_000],
+                        "episodes": [],
+                        "download": False,
+                    },
+                },
+            },
+        }
+        arr.filter_by_release_group(
+            seadex_dict=seadex_dict,
+            arr="radarr",
+            arr_release_dict={None: {"size": None}},
+            ep_list=None,
+        )
+        url_item = seadex_dict["BestGroup"]["urls"]["https://nyaa.si/view/1"]
+        self.assertTrue(url_item["download"])
+        logged = " ".join(
+            str(c.args[0]) for c in arr.logger.info.call_args_list
+        )
+        self.assertIn("nothing", logged)
+
     def test_genuinely_different_group_still_flagged(self):
         arr = self._make_arr()
         seadex_dict = {

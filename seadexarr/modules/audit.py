@@ -343,8 +343,13 @@ class SeaDexAudit(SeaDexSonarr):
         if self.audit_state is not None and not dry_run:
             for r in results:
                 if not r.error:
+                    # Pending only for results the send filter will actually
+                    # post — a status-"none" result with notify set would
+                    # otherwise stay pending forever (filtered, never sent,
+                    # never cleared).
+                    sendable = r.notify and r.seadex_status != "none"
                     self.audit_state.update_series(
-                        self._to_state(r), notified=False, pending=r.notify
+                        self._to_state(r), notified=False, pending=sendable
                     )
 
         # Notifications. Mark last_notified as each batch actually posts (not all
@@ -505,8 +510,11 @@ class SeaDexAudit(SeaDexSonarr):
             if self.audit_state is not None and not dry_run:
                 for mr in movie_results:
                     if not mr.error:
+                        sendable = mr.notify and (
+                            mr.seadex_status != "none" or mr.hardlink_mismatch
+                        )
                         self.audit_state.update_movie(
-                            self._to_movie_state(mr), notified=False, pending=mr.notify
+                            self._to_movie_state(mr), notified=False, pending=sendable
                         )
 
             def _mark_movies_notified(sent: list[MovieAuditResult]):
