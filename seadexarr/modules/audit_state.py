@@ -20,6 +20,9 @@ class MovieAuditState:
     upgrade_available: bool = False
     too_large: bool = False
     hardlink_mismatch: bool = False
+    # True when a run decided to notify but the Discord post never succeeded —
+    # the next run retries the notification even if nothing else changed.
+    notify_pending: bool = False
     last_notified: Optional[str] = None
     last_audited: str = ""
 
@@ -50,6 +53,9 @@ class SeriesAuditState:
     too_large: bool = False
     missing_specials: bool = False
     missing_season: bool = False
+    # True when a run decided to notify but the Discord post never succeeded —
+    # the next run retries the notification even if nothing else changed.
+    notify_pending: bool = False
     last_notified: Optional[str] = None
     last_audited: str = ""
 
@@ -123,6 +129,7 @@ class AuditState:
                 too_large        INTEGER NOT NULL DEFAULT 0,
                 missing_specials  INTEGER NOT NULL DEFAULT 0,
                 missing_season    INTEGER NOT NULL DEFAULT 0,
+                notify_pending   INTEGER NOT NULL DEFAULT 0,
                 last_notified    TEXT,
                 last_audited     TEXT    NOT NULL DEFAULT ''
             )
@@ -131,6 +138,7 @@ class AuditState:
         for col_def in [
             "missing_specials INTEGER NOT NULL DEFAULT 0",
             "missing_season INTEGER NOT NULL DEFAULT 0",
+            "notify_pending INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 self._conn.execute(f"ALTER TABLE series ADD COLUMN {col_def}")
@@ -149,10 +157,18 @@ class AuditState:
                 upgrade_available INTEGER NOT NULL DEFAULT 0,
                 too_large         INTEGER NOT NULL DEFAULT 0,
                 hardlink_mismatch INTEGER NOT NULL DEFAULT 0,
+                notify_pending    INTEGER NOT NULL DEFAULT 0,
                 last_notified     TEXT,
                 last_audited      TEXT    NOT NULL DEFAULT ''
             )
         """)
+        try:
+            self._conn.execute(
+                "ALTER TABLE movies ADD COLUMN notify_pending INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()
+        except Exception:
+            pass  # Column already exists
         self._conn.commit()
 
     def _migrate_from_json(self, json_path: str):
@@ -198,8 +214,9 @@ class AuditState:
             INSERT OR REPLACE INTO series
                 (sonarr_id, tvdb_id, title, seadex_status, seadex_rgs,
                  seadex_size_bytes, library_rgs, upgrade_available, too_large,
-                 missing_specials, missing_season, last_notified, last_audited)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 missing_specials, missing_season, notify_pending,
+                 last_notified, last_audited)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 state.sonarr_id,
@@ -213,6 +230,7 @@ class AuditState:
                 int(state.too_large),
                 int(state.missing_specials),
                 int(state.missing_season),
+                int(state.notify_pending),
                 state.last_notified,
                 state.last_audited,
             ),
@@ -231,6 +249,7 @@ class AuditState:
             too_large=bool(row["too_large"]),
             missing_specials=bool(row["missing_specials"]),
             missing_season=bool(row["missing_season"]),
+            notify_pending=bool(row["notify_pending"]),
             last_notified=row["last_notified"],
             last_audited=row["last_audited"],
         )
@@ -247,6 +266,11 @@ class AuditState:
 
     def should_notify(self, new_state: SeriesAuditState, discord_cfg: dict) -> bool:
         old = self.get_series(new_state.sonarr_id)
+
+        # A pending flag means a previous run decided to notify but the post
+        # never succeeded — retry regardless of whether anything changed since.
+        if old is not None and old.notify_pending:
+            return True
 
         if not state_changed(old, new_state):
             return discord_cfg.get("notify_on_no_change", False)
@@ -282,11 +306,16 @@ class AuditState:
         # State changed but no specific rule matched (e.g. partial→full when already seen)
         return discord_cfg.get("notify_on_state_change", True)
 
-    def update_series(self, state: SeriesAuditState, notified: bool = False):
+    def update_series(
+        self, state: SeriesAuditState, notified: bool = False, pending: bool = False
+    ):
         now = datetime.now(timezone.utc).isoformat()
         state.last_audited = now
         if notified:
             state.last_notified = now
+            state.notify_pending = False
+        else:
+            state.notify_pending = pending
         self._upsert_row(state)
         self._conn.commit()
 
@@ -303,8 +332,8 @@ class AuditState:
             INSERT OR REPLACE INTO movies
                 (radarr_id, tmdb_id, title, seadex_status, seadex_rgs,
                  seadex_size_bytes, library_rgs, upgrade_available, too_large,
-                 hardlink_mismatch, last_notified, last_audited)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 hardlink_mismatch, notify_pending, last_notified, last_audited)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 state.radarr_id,
@@ -317,6 +346,7 @@ class AuditState:
                 int(state.upgrade_available),
                 int(state.too_large),
                 int(state.hardlink_mismatch),
+                int(state.notify_pending),
                 state.last_notified,
                 state.last_audited,
             ),
@@ -334,6 +364,7 @@ class AuditState:
             upgrade_available=bool(row["upgrade_available"]),
             too_large=bool(row["too_large"]),
             hardlink_mismatch=bool(row["hardlink_mismatch"]),
+            notify_pending=bool(row["notify_pending"]),
             last_notified=row["last_notified"],
             last_audited=row["last_audited"],
         )
@@ -344,16 +375,26 @@ class AuditState:
         ).fetchone()
         return self._movie_row_to_state(row) if row is not None else None
 
-    def update_movie(self, state: MovieAuditState, notified: bool = False):
+    def update_movie(
+        self, state: MovieAuditState, notified: bool = False, pending: bool = False
+    ):
         now = datetime.now(timezone.utc).isoformat()
         state.last_audited = now
         if notified:
             state.last_notified = now
+            state.notify_pending = False
+        else:
+            state.notify_pending = pending
         self._upsert_movie_row(state)
         self._conn.commit()
 
     def should_notify_movie(self, new_state: MovieAuditState, discord_cfg: dict) -> bool:
         old = self.get_movie(new_state.radarr_id)
+
+        # A pending flag means a previous run decided to notify but the post
+        # never succeeded — retry regardless of whether anything changed since.
+        if old is not None and old.notify_pending:
+            return True
 
         # Hardlink mismatch always fires when first detected or when it reappears.
         if new_state.hardlink_mismatch and (old is None or not old.hardlink_mismatch):

@@ -1185,6 +1185,87 @@ class TestFilterByReleaseGroupAltLog(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# notify_pending: failed posts retried on the next run
+# ---------------------------------------------------------------------------
+
+class TestNotifyPending(unittest.TestCase):
+
+    def _with_state(self, fn):
+        path = _tmp_db()
+        state = AuditState(path)
+        try:
+            fn(state)
+        finally:
+            state.close()
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_pending_retries_when_nothing_changed(self):
+        def check(state):
+            s = _make_state(seadex_status="full")
+            # Run decided to notify but the post never succeeded.
+            state.update_series(s, notified=False, pending=True)
+            same = _make_state(seadex_status="full")
+            cfg = {"notify_on_no_change": False}
+            self.assertTrue(state.should_notify(same, cfg))
+        self._with_state(check)
+
+    def test_successful_notify_clears_pending(self):
+        def check(state):
+            s = _make_state(seadex_status="full")
+            state.update_series(s, notified=False, pending=True)
+            state.update_series(_make_state(seadex_status="full"), notified=True)
+            same = _make_state(seadex_status="full")
+            cfg = {"notify_on_no_change": False}
+            self.assertFalse(state.should_notify(same, cfg))
+        self._with_state(check)
+
+    def test_no_pending_no_change_stays_quiet(self):
+        def check(state):
+            state.update_series(_make_state(seadex_status="full"), notified=False)
+            same = _make_state(seadex_status="full")
+            cfg = {"notify_on_no_change": False}
+            self.assertFalse(state.should_notify(same, cfg))
+        self._with_state(check)
+
+    def test_old_schema_db_gains_pending_column(self):
+        # A pre-notify_pending database opens cleanly and reads pending=False.
+        import sqlite3
+        path = _tmp_db()
+        try:
+            conn = sqlite3.connect(path)
+            conn.execute("""
+                CREATE TABLE series (
+                    sonarr_id INTEGER PRIMARY KEY, tvdb_id INTEGER,
+                    title TEXT NOT NULL, seadex_status TEXT NOT NULL,
+                    seadex_rgs TEXT NOT NULL DEFAULT '[]',
+                    seadex_size_bytes INTEGER NOT NULL DEFAULT 0,
+                    library_rgs TEXT NOT NULL DEFAULT '[]',
+                    upgrade_available INTEGER NOT NULL DEFAULT 0,
+                    too_large INTEGER NOT NULL DEFAULT 0,
+                    missing_specials INTEGER NOT NULL DEFAULT 0,
+                    missing_season INTEGER NOT NULL DEFAULT 0,
+                    last_notified TEXT,
+                    last_audited TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            conn.execute(
+                "INSERT INTO series (sonarr_id, title, seadex_status) VALUES (7, 'Old Show', 'full')"
+            )
+            conn.commit()
+            conn.close()
+
+            state = AuditState(path)
+            loaded = state.get_series(7)
+            self.assertIsNotNone(loaded)
+            self.assertFalse(loaded.notify_pending)
+            state.close()
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
 # Partial status: entry exists but every release filtered out
 # ---------------------------------------------------------------------------
 

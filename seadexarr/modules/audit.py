@@ -303,21 +303,26 @@ class SeaDexAudit(SeaDexSonarr):
             # cache or have no SeaDex entry never call out, so they never wait.
 
         # Persist state before notifications so a crash during Discord doesn't
-        # leave all audited series looking new on the next run.
+        # leave all audited series looking new on the next run. Series that
+        # should notify are stamped notify_pending so a failed/never-attempted
+        # post is retried next run instead of being silently lost.
         if self.audit_state is not None and not dry_run:
             for r in results:
                 if not r.error:
-                    self.audit_state.update_series(self._to_state(r), notified=False)
+                    self.audit_state.update_series(
+                        self._to_state(r), notified=False, pending=r.notify
+                    )
 
         # Notifications. Mark last_notified as each batch actually posts (not all
         # at the end), so a crash mid-notify can't replay already-sent series on
-        # the next run.
+        # the next run. stats["notified"] counts successful posts, not attempts.
         def _mark_notified(sent: list[AuditResult]):
+            sent_ok = [r for r in sent if not r.error]
+            stats["notified"] += len(sent_ok)
             if self.audit_state is None or dry_run:
                 return
-            for r in sent:
-                if not r.error:
-                    self.audit_state.update_series(self._to_state(r), notified=True)
+            for r in sent_ok:
+                self.audit_state.update_series(self._to_state(r), notified=True)
             self.audit_state.save()
 
         to_notify = [r for r in results if r.notify and r.seadex_status != "none"]
@@ -329,7 +334,6 @@ class SeaDexAudit(SeaDexSonarr):
                     self._send_single_discord(
                         r, old_states.get(r.sonarr_id), on_sent=_mark_notified
                     )
-            stats["notified"] = len(to_notify)
 
         # ------------------------------------------------------------------
         # Radarr audit
@@ -432,18 +436,22 @@ class SeaDexAudit(SeaDexSonarr):
                 elif dry_run and do_tags:
                     self._log_dry_run_movie_tags(movie_result)
 
-            # Persist movie state before notifications
+            # Persist movie state before notifications; stamp notify_pending so
+            # failed posts are retried next run.
             if self.audit_state is not None and not dry_run:
                 for mr in movie_results:
                     if not mr.error:
-                        self.audit_state.update_movie(self._to_movie_state(mr), notified=False)
+                        self.audit_state.update_movie(
+                            self._to_movie_state(mr), notified=False, pending=mr.notify
+                        )
 
             def _mark_movies_notified(sent: list[MovieAuditResult]):
+                sent_ok = [mr for mr in sent if not mr.error]
+                radarr_stats["notified"] += len(sent_ok)
                 if self.audit_state is None or dry_run:
                     return
-                for mr in sent:
-                    if not mr.error:
-                        self.audit_state.update_movie(self._to_movie_state(mr), notified=True)
+                for mr in sent_ok:
+                    self.audit_state.update_movie(self._to_movie_state(mr), notified=True)
                 self.audit_state.save()
 
             movies_to_notify = [
@@ -460,7 +468,6 @@ class SeaDexAudit(SeaDexSonarr):
                         self._send_single_movie_discord(
                             mr, movie_old_states.get(mr.radarr_id), on_sent=_mark_movies_notified
                         )
-                radarr_stats["notified"] = len(movies_to_notify)
 
         # Persist the warm AniList cache so the next run skips those calls (and
         # their rate-limit sleeps). Notifications above may have added thumbnail
