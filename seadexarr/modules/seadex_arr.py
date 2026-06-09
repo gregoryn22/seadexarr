@@ -120,7 +120,7 @@ def get_all_seadex_rgs_per_episode(
                 # If we haven't managed to parse, then set this up as an
                 # "all" episodes fallback
                 if len(seadex_episodes) == 0:
-                    if seadex_rg not in all_seadex_rgs_per_episode.get(seadex_rg, []):
+                    if seadex_rg not in all_seadex_rgs_per_episode["all"]:
                         all_seadex_rgs_per_episode["all"].append(seadex_rg)
 
                 found_episodes = [False] * len(seadex_episodes)
@@ -1597,12 +1597,26 @@ class SeaDexArr:
                         torrent_hash=item_hash,
                     )
 
-                # Otherwise, bug out
+                # Otherwise skip — there is no torrent-link parser for this
+                # tracker (e.g. private trackers like AB), and raising here
+                # used to abort the rest of the title's downloads.
                 else:
-                    raise ValueError(f"Unable to parse torrent links from {tracker}")
+                    self.logger.warning(
+                        left_aligned_string(
+                            f"   Skipping {url}: no torrent-link parser for tracker {tracker}",
+                            total_length=self.log_line_length,
+                        )
+                    )
+                    continue
 
                 if parsed_url is None:
-                    raise Exception("Have not managed to parse the torrent URL")
+                    self.logger.warning(
+                        left_aligned_string(
+                            f"   Skipping {url}: could not parse a torrent URL",
+                            total_length=self.log_line_length,
+                        )
+                    )
+                    continue
 
                 if torrent_client == "qbit":
                     success = self.add_torrent_to_qbit(

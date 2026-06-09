@@ -334,5 +334,70 @@ class TestGetEpListSpecial(unittest.TestCase):
         )
 
 
+class TestCheckEpByAnibridge(unittest.TestCase):
+    """AniBridge tvdb_mappings episode-range parsing."""
+
+    def _check(self, season, episode, tvdb_mappings):
+        from seadexarr.modules.seadex_sonarr import check_ep_by_anibridge
+        ep = {"seasonNumber": season, "episodeNumber": episode}
+        return check_ep_by_anibridge(ep=ep, tvdb_mappings=tvdb_mappings)
+
+    def test_whole_season(self):
+        self.assertTrue(self._check(1, 5, {"s1": ""}))
+        self.assertFalse(self._check(2, 5, {"s1": ""}))
+
+    def test_single_episode(self):
+        self.assertTrue(self._check(0, 3, {"s0": "e3"}))
+        self.assertFalse(self._check(0, 4, {"s0": "e3"}))
+
+    def test_closed_range(self):
+        self.assertTrue(self._check(1, 12, {"s1": "e1-e12"}))
+        self.assertFalse(self._check(1, 13, {"s1": "e1-e12"}))
+
+    def test_open_ended_range(self):
+        # "e13-" used to crash with int('') — must mean episode 13 onwards.
+        self.assertTrue(self._check(1, 13, {"s1": "e13-"}))
+        self.assertTrue(self._check(1, 999, {"s1": "e13-"}))
+        self.assertFalse(self._check(1, 12, {"s1": "e13-"}))
+
+    def test_ratio_suffix_ignored(self):
+        self.assertTrue(self._check(1, 2, {"s1": "e1-e12|2"}))
+
+
+class TestGetOverlappingResults(unittest.TestCase):
+    """rg1/rg2 copy-paste regression: each group must be compared against the
+    OTHER group's episodes, not its own."""
+
+    def _dict(self, eps_by_rg):
+        return {
+            rg: {"all_episodes": [{"season": s, "episode": e} for s, e in eps]}
+            for rg, eps in eps_by_rg.items()
+        }
+
+    def test_disjoint_groups_do_not_overlap(self):
+        from seadexarr.modules.seadex_sonarr import get_overlapping_results
+        d = self._dict({
+            "A": [(1, 1), (1, 2)],
+            "B": [(1, 3), (1, 4)],
+        })
+        self.assertFalse(get_overlapping_results(d))
+
+    def test_shared_episode_overlaps(self):
+        from seadexarr.modules.seadex_sonarr import get_overlapping_results
+        d = self._dict({
+            "A": [(1, 1), (1, 2)],
+            "B": [(1, 2), (1, 3)],
+        })
+        self.assertTrue(get_overlapping_results(d))
+
+    def test_unparsed_group_assumed_overlapping(self):
+        from seadexarr.modules.seadex_sonarr import get_overlapping_results
+        d = self._dict({
+            "A": [(1, 1)],
+            "B": [],
+        })
+        self.assertTrue(get_overlapping_results(d))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -76,9 +76,9 @@ def get_overlapping_results(seadex_dict):
                 if rg1 == rg2:
                     continue
 
-                rg2_all_eps = seadex_dict.get(rg1, {}).get("all_episodes", [])
+                rg2_all_eps = seadex_dict.get(rg2, {}).get("all_episodes", [])
 
-                if len(rg2_all_eps) == 0 or len(rg2_all_eps) == 0:
+                if len(rg1_all_eps) == 0 or len(rg2_all_eps) == 0:
                     overlapping_results = True
 
                 # Also, if we have an instance where one hasn't been parsed
@@ -171,12 +171,14 @@ def check_ep_by_anibridge(
                 episode_split_start_end = episode_split.split("-")
                 episode_split_start = int(episode_split_start_end[0].strip("e"))
 
-                # Now we might have an open-ended end point, in which case set to
-                # a large number
-                if len(episode_split_start_end) == 1:
-                    episode_split_end = 9999
-                else:
-                    episode_split_end = int(episode_split_start_end[1].strip("e"))
+                # An open-ended range ("e13-") splits to an empty end part —
+                # treat it as unbounded
+                end_str = (
+                    episode_split_start_end[1].strip("e")
+                    if len(episode_split_start_end) > 1
+                    else ""
+                )
+                episode_split_end = int(end_str) if end_str else 9999
 
                 if episode_split_start <= ep_episode <= episode_split_end:
                     return True
