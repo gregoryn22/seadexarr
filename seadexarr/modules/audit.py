@@ -703,6 +703,14 @@ class SeaDexAudit(SeaDexSonarr):
         # Sonarr couldn't map to episode numbers.
         out["missing_episodes"] = self._collect_download_episodes(seadex_dict)
 
+        # Narrow seadex_size_bytes to only the releases flagged for download so
+        # the too_large check and Discord display reflect the actual upgrade size,
+        # not the sum of every release SeaDex lists.
+        if out["upgrade_available"]:
+            dl_size = self._sum_download_size(seadex_dict)
+            if dl_size > 0:
+                out["seadex_size_bytes"] = dl_size
+
         if out["upgrade_available"] and self.size_filter_enabled:
             sd_gb = out["seadex_size_bytes"] / BYTES_PER_GB
             lib_bytes = out["library_size_bytes"]
@@ -1379,12 +1387,39 @@ class SeaDexAudit(SeaDexSonarr):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _sum_seadex_size(self, seadex_dict: dict) -> int:
-        total = 0
+    @staticmethod
+    def _iter_unique_urls(seadex_dict: dict):
+        """Yield (url_data,) for each URL, skipping duplicate infohashes.
+
+        The same torrent hosted on multiple trackers shares an infohash.
+        Deduplicating here prevents double-counting sizes.
+        """
+        seen_hashes: set = set()
         for rg_data in seadex_dict.values():
             for url_data in (rg_data.get("urls") or {}).values():
-                sizes = (url_data or {}).get("size", []) or []
-                total += sum(s for s in sizes if s)
+                h = (url_data or {}).get("hash")
+                if h is not None:
+                    if h in seen_hashes:
+                        continue
+                    seen_hashes.add(h)
+                yield url_data
+
+    def _sum_seadex_size(self, seadex_dict: dict) -> int:
+        """Sum all SeaDex file sizes (all releases), deduplicating by infohash."""
+        total = 0
+        for url_data in self._iter_unique_urls(seadex_dict):
+            sizes = (url_data or {}).get("size", []) or []
+            total += sum(s for s in sizes if s)
+        return total
+
+    def _sum_download_size(self, seadex_dict: dict) -> int:
+        """Sum sizes of URLs flagged for download, deduplicating by infohash."""
+        total = 0
+        for url_data in self._iter_unique_urls(seadex_dict):
+            if not (url_data or {}).get("download"):
+                continue
+            sizes = (url_data or {}).get("size", []) or []
+            total += sum(s for s in sizes if s)
         return total
 
     def _to_state(self, result: AuditResult) -> SeriesAuditState:
@@ -1620,6 +1655,11 @@ class SeaDexAudit(SeaDexSonarr):
             acceptable_alt_owned=acceptable_alt_owned,
         )
         out["upgrade_available"] = self.get_any_to_download(seadex_dict=seadex_dict)
+
+        if out["upgrade_available"]:
+            dl_size = self._sum_download_size(seadex_dict)
+            if dl_size > 0:
+                out["seadex_size_bytes"] = dl_size
 
         if out["upgrade_available"] and self.size_filter_enabled:
             sd_gb = out["seadex_size_bytes"] / BYTES_PER_GB
