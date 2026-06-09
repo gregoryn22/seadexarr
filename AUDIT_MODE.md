@@ -50,9 +50,8 @@ copies a template with all defaults already filled in.
 
 ```yaml
 audit:
-  enabled: false
   dry_run: true           # safe default: no mutations until you set false
-  sonarr_only: true
+  include_radarr: true    # also audit Radarr movies (needs radarr_url/radarr_api_key)
   notify_discord: true
   update_sonarr_tags: true
   remove_stale_tags: false  # only removes tags listed in audit.tags
@@ -62,13 +61,14 @@ audit:
     partial_seadex: partial-seadex
     upgrade_available: seadex-upgrade-available
     too_large: seadex-too-large
+    missing_specials: seadex-missing-specials
+    missing_season: seadex-missing-season
     ignored: seadex-ignored
 
   size_filters:
     enabled: true
     max_absolute_gb: 80          # flag if SeaDex release > 80 GB total
     max_size_multiplier: 2.0     # flag if > 2× your current files' size
-    notify_when_too_large: true
     tag_when_too_large: true
 
   discord:
@@ -76,12 +76,15 @@ audit:
     notify_on_new_upgrade_available: true
     notify_on_partial_match: true
     notify_on_too_large: true
+    notify_on_missing_specials: true
+    notify_on_missing_season: true
+    notify_on_state_change: true   # any other state change (e.g. SeaDex release list updated)
     notify_on_no_change: false
-    batch_notifications: true    # group up to 10 series per Discord message
+    batch_notifications: true    # group a few series per Discord message
 
   state:
     enabled: true
-    path:    # leave blank to use /config/audit_state.json
+    path:    # leave blank to use /config/audit_state.db
 ```
 
 The `discord_url` from the top-level config is reused.
@@ -128,7 +131,8 @@ too-large series, where the best is skipped but a smaller alt still fits.
 
 ## State file
 
-`audit_state.json` (default `/config/audit_state.json`) tracks per-series
+`audit_state.db` (default `/config/audit_state.db`; legacy `.json` state is
+migrated automatically) tracks per-series
 state between runs so Discord is not spammed. Notifications fire only when:
 
 - A series newly appears on SeaDex.

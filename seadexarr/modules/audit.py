@@ -123,7 +123,21 @@ class SeaDexAudit(SeaDexSonarr):
             self.tag_ignored,
         ]
 
+        # Warn on obsolete keys that look like they do something but are never
+        # read, so a config that sets them isn't silently ignored.
+        if "sonarr_only" in audit_cfg:
+            self.logger.warning(
+                "Config: audit.sonarr_only is not a recognised key and has no "
+                "effect — use audit.include_radarr (defaults to true)"
+            )
+
         size_cfg = audit_cfg.get("size_filters", {}) or {}
+        if "notify_when_too_large" in size_cfg:
+            self.logger.warning(
+                "Config: audit.size_filters.notify_when_too_large is not a "
+                "recognised key and has no effect — use "
+                "audit.discord.notify_on_too_large"
+            )
         self.size_filter_enabled: bool = size_cfg.get("enabled", True)
         self.max_absolute_gb: float = size_cfg.get("max_absolute_gb", 80)
         self.max_size_multiplier: float = size_cfg.get("max_size_multiplier", 2.0)

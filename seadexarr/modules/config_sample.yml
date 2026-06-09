@@ -58,9 +58,8 @@ log_level: "INFO"
 
 # Audit mode: scan, classify, tag — never grabs torrents
 audit:
-  enabled: false
   dry_run: true           # true = log only, no Sonarr mutations
-  sonarr_only: true
+  include_radarr: true    # also audit Radarr movies (needs radarr_url/radarr_api_key)
   notify_discord: true
   update_sonarr_tags: true
   remove_stale_tags: false  # only removes tags listed in audit.tags
@@ -83,7 +82,6 @@ audit:
     enabled: true
     max_absolute_gb: 80
     max_size_multiplier: 2.0
-    notify_when_too_large: true
     tag_when_too_large: true
 
   discord:
@@ -93,6 +91,7 @@ audit:
     notify_on_too_large: true
     notify_on_missing_specials: true
     notify_on_missing_season: true
+    notify_on_state_change: true   # any other state change (e.g. SeaDex release list updated)
     notify_on_no_change: false
     batch_notifications: true
 
