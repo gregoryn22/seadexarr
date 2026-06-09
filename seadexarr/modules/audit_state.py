@@ -253,12 +253,6 @@ class AuditState:
 
         was_none = old is None or old.seadex_status == "none"
 
-        if new_state.seadex_status == "partial" and was_none:
-            return discord_cfg.get("notify_on_partial_match", True)
-
-        if new_state.seadex_status == "full" and was_none:
-            return discord_cfg.get("notify_on_new_seadex_match", True)
-
         newly_upgrade = new_state.upgrade_available and (old is None or not old.upgrade_available)
         if newly_upgrade:
             return discord_cfg.get("notify_on_new_upgrade_available", True)
@@ -278,6 +272,12 @@ class AuditState:
         )
         if newly_missing_season:
             return discord_cfg.get("notify_on_missing_season", True)
+
+        if new_state.seadex_status == "partial" and was_none:
+            return discord_cfg.get("notify_on_partial_match", True)
+
+        if new_state.seadex_status == "full" and was_none:
+            return discord_cfg.get("notify_on_new_seadex_match", True)
 
         # State changed but no specific rule matched (e.g. partial→full when already seen)
         return discord_cfg.get("notify_on_state_change", True)
@@ -364,12 +364,6 @@ class AuditState:
 
         was_none = old is None or old.seadex_status == "none"
 
-        if new_state.seadex_status == "partial" and was_none:
-            return discord_cfg.get("notify_on_partial_match", True)
-
-        if new_state.seadex_status == "full" and was_none:
-            return discord_cfg.get("notify_on_new_seadex_match", True)
-
         newly_upgrade = new_state.upgrade_available and (old is None or not old.upgrade_available)
         if newly_upgrade:
             return discord_cfg.get("notify_on_new_upgrade_available", True)
@@ -377,6 +371,12 @@ class AuditState:
         newly_large = new_state.too_large and (old is None or not old.too_large)
         if newly_large:
             return discord_cfg.get("notify_on_too_large", True)
+
+        if new_state.seadex_status == "partial" and was_none:
+            return discord_cfg.get("notify_on_partial_match", True)
+
+        if new_state.seadex_status == "full" and was_none:
+            return discord_cfg.get("notify_on_new_seadex_match", True)
 
         return discord_cfg.get("notify_on_state_change", True)
 
