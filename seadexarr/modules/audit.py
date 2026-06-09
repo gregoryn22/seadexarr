@@ -719,11 +719,15 @@ class SeaDexAudit(SeaDexSonarr):
 
         # Detect S00 episodes SeaDex tracks that are completely absent from
         # library (no file on disk), distinct from having the wrong release.
-        # Only applies when this entry's mapping explicitly targets season 0 —
+        # Only applies when this entry's mapping explicitly targets season 0,
+        # OR when the resolved ep_list only contains S00 episodes (some mappings
+        # omit tvdb_season but Sonarr still places the episodes in S00).
         # S00 episodes appearing in a main-series torrent (e.g. a bonus episode
         # bundled with S01) are incidental and must not trigger missing_specials,
         # since specials are audited via their own AniList entry.
-        if out.get("tvdb_season") == 0:
+        ep_list_seasons = {ep.get("seasonNumber") for ep in ep_list if ep.get("seasonNumber") is not None}
+        is_specials_entry = out.get("tvdb_season") == 0 or (ep_list_seasons == {0})
+        if is_specials_entry:
             # Restrict to S00 episodes this mapping is responsible for.  When a
             # shared torrent covers multiple specials entries (e.g. one pack for
             # both Kokoro-chan S00E03 and Valentine Days S00E02), each AniList
@@ -767,7 +771,7 @@ class SeaDexAudit(SeaDexSonarr):
         if (
             out["seadex_status"] == "full"
             and not out["library_rgs"]
-            and out.get("tvdb_season") != 0
+            and not is_specials_entry
         ):
             out["missing_season"] = True
             # upgrade_available is a false positive when nothing is in library
@@ -1286,9 +1290,14 @@ class SeaDexAudit(SeaDexSonarr):
         if not self.discord_url:
             return
         discord = Discord(url=self.discord_url)
-        discord.post(embeds=[self._build_embed(result, old_state)])
-        # Confirm the post before stamping notified — a raise above skips this so
-        # the series stays un-notified and is retried next run.
+        response = discord.post(embeds=[self._build_embed(result, old_state)])
+        if response is not None and not response.ok:
+            self.logger.warning(
+                "Discord post failed for %s (%s): %s",
+                result.sonarr_title, response.status_code, response.text[:200],
+            )
+            time.sleep(1)
+            return
         if on_sent is not None:
             on_sent([result])
         time.sleep(1)
@@ -1309,7 +1318,15 @@ class SeaDexAudit(SeaDexSonarr):
                 self._build_embed(r, old_states.get(r.sonarr_id)) for r in batch
             ]
             discord = Discord(url=self.discord_url)
-            discord.post(embeds=embeds)
+            response = discord.post(embeds=embeds)
+            if response is not None and not response.ok:
+                titles = ", ".join(r.sonarr_title for r in batch)
+                self.logger.warning(
+                    "Discord batch post failed (%s) for [%s]: %s",
+                    response.status_code, titles, response.text[:200],
+                )
+                time.sleep(1)
+                continue
             # Stamp this batch as notified only after its post succeeds, so a
             # crash on a later batch never replays the batches already sent.
             if on_sent is not None:
@@ -1853,7 +1870,14 @@ class SeaDexAudit(SeaDexSonarr):
             return
         from discordwebhook import Discord
         discord = Discord(url=self.discord_url)
-        discord.post(embeds=[self._build_movie_embed(result, old_state)])
+        response = discord.post(embeds=[self._build_movie_embed(result, old_state)])
+        if response is not None and not response.ok:
+            self.logger.warning(
+                "Discord post failed for %s (%s): %s",
+                result.radarr_title, response.status_code, response.text[:200],
+            )
+            time.sleep(1)
+            return
         if on_sent is not None:
             on_sent([result])
         time.sleep(1)
@@ -1874,7 +1898,15 @@ class SeaDexAudit(SeaDexSonarr):
                 self._build_movie_embed(mr, old_states.get(mr.radarr_id)) for mr in batch
             ]
             discord = Discord(url=self.discord_url)
-            discord.post(embeds=embeds)
+            response = discord.post(embeds=embeds)
+            if response is not None and not response.ok:
+                titles = ", ".join(mr.radarr_title for mr in batch)
+                self.logger.warning(
+                    "Discord batch post failed (%s) for [%s]: %s",
+                    response.status_code, titles, response.text[:200],
+                )
+                time.sleep(1)
+                continue
             if on_sent is not None:
                 on_sent(batch)
             time.sleep(1)
