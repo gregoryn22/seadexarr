@@ -1585,5 +1585,67 @@ class TestPartialStatus(unittest.TestCase):
         self.assertIn("no release passes your filters", head)
 
 
+class TestSpecialsInference(unittest.TestCase):
+
+    def _make_audit(self):
+        audit = SeaDexAudit.__new__(SeaDexAudit)
+        audit.alt_is_acceptable = False
+        audit.size_filter_enabled = False
+        audit.ignore_tags = []
+        audit.trackers = ["nyaa"]
+        audit.public_only = False
+        audit.log_line_length = 80
+        audit.logger = MagicMock()
+        audit.al_cache = {12345: {"data": {"Media": {"format": "OVA"}}}}
+        return audit
+
+    def test_anibridge_s0_mapping_without_tvdb_season_is_specials(self):
+        audit = self._make_audit()
+        self.assertTrue(
+            audit._mapping_targets_specials(
+                mapping={"tvdb_mappings": {"s0": "e1-e3"}},
+                tvdb_season=-1,
+                ep_list_seasons=set(),
+            )
+        )
+
+    def test_specials_only_mapping_without_ep_matches_sets_unknown_specials(self):
+        audit = self._make_audit()
+        mock_series = MagicMock()
+        mock_series.id = 1
+        mock_series.title = "Test OVA"
+        mock_sd_entry = MagicMock()
+        mock_sd_entry.url = "https://seadex.moe/test"
+
+        mapping = {"tvdb_mappings": {"s0": "e1-e3"}}
+        seadex_dict = {
+            "BestGroup": {
+                "urls": {
+                    "https://example.com/torrent": {
+                        "episodes": [],
+                        "download": False,
+                    }
+                }
+            }
+        }
+
+        with patch.object(audit, "get_seadex_entry", return_value=mock_sd_entry), \
+             patch.object(audit, "get_anilist_title", return_value="Test OVA"), \
+             patch.object(audit, "get_ep_list", return_value=[]), \
+             patch.object(audit, "get_sonarr_release_dict", return_value={}), \
+             patch.object(audit, "get_seadex_dict", return_value=seadex_dict), \
+             patch.object(audit, "_sum_seadex_size", return_value=1_000_000_000), \
+             patch.object(audit, "parse_episodes_from_seadex", return_value=seadex_dict), \
+             patch.object(audit, "filter_seadex_downloads", return_value=(True, seadex_dict)), \
+             patch.object(audit, "get_any_to_download", return_value=True):
+            out = audit._audit_al_id(mock_series, 12345, mapping)
+
+        self.assertTrue(out["missing_specials_unknown"])
+        self.assertFalse(out["missing_season"])
+        self.assertFalse(out["upgrade_available"])
+        debug_msgs = " ".join(str(c.args[0]) for c in audit.logger.debug.call_args_list)
+        self.assertIn("likely Sonarr parse failure or upstream mapping mismatch", debug_msgs)
+
+
 if __name__ == "__main__":
     unittest.main()

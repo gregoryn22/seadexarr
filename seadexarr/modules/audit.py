@@ -842,8 +842,16 @@ class SeaDexAudit(SeaDexSonarr):
         # S00 episodes appearing in a main-series torrent (e.g. a bonus episode
         # bundled with S01) are incidental and must not trigger missing_specials,
         # since specials are audited via their own AniList entry.
-        ep_list_seasons = {ep.get("seasonNumber") for ep in ep_list if ep.get("seasonNumber") is not None}
-        is_specials_entry = out.get("tvdb_season") == 0 or (ep_list_seasons == {0})
+        ep_list_seasons = {
+            ep.get("seasonNumber")
+            for ep in ep_list
+            if ep.get("seasonNumber") is not None
+        }
+        is_specials_entry = self._mapping_targets_specials(
+            mapping=mapping,
+            tvdb_season=out.get("tvdb_season"),
+            ep_list_seasons=ep_list_seasons,
+        )
         if is_specials_entry:
             # Restrict to S00 episodes this mapping is responsible for.  When a
             # shared torrent covers multiple specials entries (e.g. one pack for
@@ -879,6 +887,14 @@ class SeaDexAudit(SeaDexSonarr):
                 # SeaDex covers this as specials but filenames couldn't be parsed,
                 # so we can't enumerate which episodes are missing.
                 out["missing_specials_unknown"] = True
+                self.logger.debug(
+                    left_aligned_string(
+                        "Specials mapping has a full SeaDex entry but no matching "
+                        "library slice was resolved; likely Sonarr parse failure "
+                        "or upstream mapping mismatch",
+                        total_length=self.log_line_length,
+                    )
+                )
                 out["upgrade_available"] = False
                 out["too_large"] = False
                 out["missing_episodes"] = []
@@ -891,12 +907,49 @@ class SeaDexAudit(SeaDexSonarr):
             and not is_specials_entry
         ):
             out["missing_season"] = True
+            self.logger.debug(
+                left_aligned_string(
+                    "Non-specials mapping has a full SeaDex entry but no files in "
+                    "the resolved library slice; likely a genuinely missing season "
+                    "or an upstream mapping mismatch",
+                    total_length=self.log_line_length,
+                )
+            )
             # upgrade_available is a false positive when nothing is in library
             out["upgrade_available"] = False
             out["too_large"] = False
             out["missing_episodes"] = []
 
         return out
+
+    @staticmethod
+    def _mapping_targets_specials(
+        mapping: dict,
+        tvdb_season: int,
+        ep_list_seasons: set[int],
+    ) -> bool:
+        """Infer whether a mapping is for Sonarr specials (season 0).
+
+        AniBridge commonly encodes specials-only entries via ``tvdb_mappings``
+        without also setting ``tvdb_season``. When those mappings resolve to no
+        Sonarr episodes, we still need to treat them as specials so the audit
+        doesn't mislabel them as a missing season.
+        """
+
+        if tvdb_season == 0 or ep_list_seasons == {0}:
+            return True
+
+        tvdb_mappings = mapping.get("tvdb_mappings", {})
+        if tvdb_mappings:
+            seasons = {
+                key.lower()
+                for key in tvdb_mappings.keys()
+                if isinstance(key, str) and key.lower().startswith("s")
+            }
+            if seasons and seasons == {"s0"}:
+                return True
+
+        return False
 
     @staticmethod
     def _collect_download_episodes(seadex_dict) -> list[tuple[int, int]]:
